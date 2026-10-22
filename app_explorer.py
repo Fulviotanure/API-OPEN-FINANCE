@@ -986,6 +986,11 @@ class ModernPluggyApp(ctk.CTk):
         self.var_data_ini = MascaraDataVar()
         self.var_data_fim = MascaraDataVar()
 
+        self._last_auto_searched_id = None
+        self._last_diag_searched_id = None
+        self._last_consent_searched_id = None
+        self._debounce_timer = None
+
         self.carregar_config()
         self.configurar_estilos_treeview()
         self.criar_cabecalho()
@@ -993,6 +998,7 @@ class ModernPluggyApp(ctk.CTk):
         self.aplicar_mes(self.nav_year, self.nav_month)
 
         self.after(150, lambda: threading.Thread(target=self.obter_api_key, daemon=True).start())
+        self.after(3000, lambda: threading.Thread(target=lambda: self.verificar_atualizacoes(silencioso=True), daemon=True).start())
 
     def _processar_fila_ui(self):
         try:
@@ -1039,6 +1045,17 @@ class ModernPluggyApp(ctk.CTk):
         if ICON_PNG_B64:
             try:
                 img_data = base64.b64decode(ICON_PNG_B64)
+                pil_img = Image.open(io.BytesIO(img_data))
+                return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+            except Exception:
+                pass
+        return None
+
+    def obter_empty_state_image(self, size=(54, 54)):
+        """Obtém o ícone de empty state em alta definição a partir de Base64"""
+        if EMPTY_STATE_PNG_B64:
+            try:
+                img_data = base64.b64decode(EMPTY_STATE_PNG_B64)
                 pil_img = Image.open(io.BytesIO(img_data))
                 return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
             except Exception:
@@ -1116,7 +1133,8 @@ class ModernPluggyApp(ctk.CTk):
         if "Ativa" in texto:
             bg_pill = "#064E3B"
             border_pill = "#059669"
-            dot = "● "
+            dot = "• "
+            cor = "#34D399"
         elif "Conectando" in texto:
             bg_pill = "#0C4A6E"
             border_pill = "#0284C7"
@@ -1257,49 +1275,72 @@ class ModernPluggyApp(ctk.CTk):
         )
         self.tabview.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 16))
 
-        self.tab_transacoes = self.tabview.add("  Explorer de Transações  ")
-        self.tab_diagnostico = self.tabview.add("  Diagnóstico de Item (Erros)  ")
-        self.tab_consentimento = self.tabview.add("  Situação do Consentimento  ")
+        self.tab_transacoes = self.tabview.add("Explorer de Transações")
+        self.tab_diagnostico = self.tabview.add("Diagnóstico de Item (Erros)")
+        self.tab_consentimento = self.tabview.add("Situação do Consentimento")
 
         self.setup_aba_transacoes()
         self.setup_aba_diagnostico()
         self.setup_aba_consentimento()
 
     def setup_aba_transacoes(self):
-        # 1. Painel de Filtros Organizado de Cima para Baixo:
-        # Ordem: 1 - Item ID, 2 - Conta, 3 - Data + Navegação + Botão de Ver Transações
+        # 1. Painel de Filtros Organizado Conforme Imagem:
+        # Card 1: Container arredondado com borda sutil
         card_filtros = ctk.CTkFrame(self.tab_transacoes, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
-        card_filtros.pack(fill=tk.X, padx=8, pady=(6, 10))
+        card_filtros.pack(fill=tk.X, padx=8, pady=(4, 10))
 
         # ----------------------------------------------------
-        # LINHA 1 (SUPERIOR): ITEM ID E CONTA DIVIDINDO A TELA (50% / 50%)
-        # Títulos posicionados sobre os campos
+        # LINHA 1 (SUPERIOR): ITEM ID + BOTÃO BUSCAR CONTAS E CONTA
         # ----------------------------------------------------
         row1 = ctk.CTkFrame(card_filtros, fg_color="transparent")
         row1.pack(fill=tk.X, padx=16, pady=(12, 6))
-        row1.columnconfigure(0, weight=1)
-        row1.columnconfigure(1, weight=1)
+        row1.columnconfigure(0, weight=3)
+        row1.columnconfigure(1, weight=2)
 
-        # Coluna Esquerda: Item ID
+        # Coluna Esquerda: Item ID com campo amplo e botão 1. Buscar Contas logo ao lado
         col_item = ctk.CTkFrame(row1, fg_color="transparent")
-        col_item.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        col_item.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
         lbl_item = ctk.CTkLabel(col_item, text="Item ID:", font=("Segoe UI", 11, "bold"), text_color="#94A3B8")
         lbl_item.pack(anchor="w", pady=(0, 4))
 
+        frame_item_ctrl = ctk.CTkFrame(col_item, fg_color="transparent")
+        frame_item_ctrl.pack(fill=tk.X)
+
         self.entry_item_id = ctk.CTkEntry(
-            col_item,
+            frame_item_ctrl,
             placeholder_text="Cole o Item ID aqui (ex: e7c2394d-e9c5-4ad9-9069-7c85...) ou Account ID",
-            height=36,
+            height=38,
             font=("Consolas", 11),
-            border_color="#1F2937"
+            border_color="#1F2937",
+            fg_color="#162032"
         )
-        self.entry_item_id.pack(fill=tk.X)
+        self.entry_item_id.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
         self.entry_item_id.bind("<Return>", lambda e: self.acao_buscar_contas())
+
+        # Vínculos automáticos para sincronização e pesquisa imediata ao colar ou digitar
+        self.entry_item_id.bind("<Control-v>", self._ao_colar_item_id)
+        self.entry_item_id.bind("<Control-V>", self._ao_colar_item_id)
+        self.entry_item_id.bind("<<Paste>>", self._ao_colar_item_id)
+        self.entry_item_id.bind("<KeyRelease>", self._ao_mudar_item_id_debounce)
+        self._criar_menu_contexto_entry(self.entry_item_id)
+
+        self.btn_buscar_contas = ctk.CTkButton(
+            frame_item_ctrl,
+            text="1. Buscar Contas",
+            width=150,
+            height=38,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=("Segoe UI", 11, "bold"),
+            corner_radius=8,
+            command=self.acao_buscar_contas
+        )
+        self.btn_buscar_contas.pack(side=tk.RIGHT)
 
         # Coluna Direita: Conta
         col_conta = ctk.CTkFrame(row1, fg_color="transparent")
-        col_conta.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        col_conta.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
         lbl_conta = ctk.CTkLabel(col_conta, text="Conta:", font=("Segoe UI", 11, "bold"), text_color="#94A3B8")
         lbl_conta.pack(anchor="w", pady=(0, 4))
@@ -1307,22 +1348,23 @@ class ModernPluggyApp(ctk.CTk):
         self.combo_contas = ctk.CTkComboBox(
             col_conta,
             values=["Informe o Item ID e clique em '1. Buscar Contas'"],
-            height=36,
+            height=38,
             font=("Segoe UI", 11),
             state="readonly",
-            border_color="#1F2937"
+            border_color="#1F2937",
+            fg_color="#162032"
         )
         self.combo_contas.pack(fill=tk.X)
 
         # ----------------------------------------------------
-        # LINHA 2: DATA E SELEÇÃO DE MESES COM TÍTULOS SOBRE OS CAMPOS
+        # LINHA 2: DATA, NAVEGAÇÃO DE MESES E BOTÃO 2. VER TRANSAÇÕES
         # ----------------------------------------------------
         row2 = ctk.CTkFrame(card_filtros, fg_color="transparent")
-        row2.pack(fill=tk.X, padx=16, pady=(4, 6))
+        row2.pack(fill=tk.X, padx=16, pady=(4, 12))
 
         # Sub-bloco 1: Data Início
         blk_ini = ctk.CTkFrame(row2, fg_color="transparent")
-        blk_ini.pack(side=tk.LEFT, padx=(0, 10))
+        blk_ini.pack(side=tk.LEFT, padx=(0, 8))
 
         lbl_dini = ctk.CTkLabel(blk_ini, text="Data Início:", font=("Segoe UI", 11, "bold"), text_color="#94A3B8")
         lbl_dini.pack(anchor="w", pady=(0, 4))
@@ -1331,10 +1373,11 @@ class ModernPluggyApp(ctk.CTk):
             blk_ini,
             textvariable=self.var_data_ini,
             placeholder_text="DD/MM/AAAA",
-            width=115,
+            width=105,
             height=36,
             font=("Consolas", 11),
-            border_color="#1F2937"
+            border_color="#1F2937",
+            fg_color="#162032"
         )
         self.entry_data_ini.pack()
         self.entry_data_ini.bind("<Return>", lambda e: self.acao_buscar_transacoes())
@@ -1342,7 +1385,7 @@ class ModernPluggyApp(ctk.CTk):
 
         # Sub-bloco 2: Data Fim
         blk_fim = ctk.CTkFrame(row2, fg_color="transparent")
-        blk_fim.pack(side=tk.LEFT, padx=(0, 16))
+        blk_fim.pack(side=tk.LEFT, padx=(0, 14))
 
         lbl_dfim = ctk.CTkLabel(blk_fim, text="Data Fim:", font=("Segoe UI", 11, "bold"), text_color="#94A3B8")
         lbl_dfim.pack(anchor="w", pady=(0, 4))
@@ -1351,16 +1394,17 @@ class ModernPluggyApp(ctk.CTk):
             blk_fim,
             textvariable=self.var_data_fim,
             placeholder_text="DD/MM/AAAA",
-            width=115,
+            width=105,
             height=36,
             font=("Consolas", 11),
-            border_color="#1F2937"
+            border_color="#1F2937",
+            fg_color="#162032"
         )
         self.entry_data_fim.pack()
         self.entry_data_fim.bind("<Return>", lambda e: self.acao_buscar_transacoes())
         self.var_data_fim.vincular_entry(self.entry_data_fim)
 
-        # Sub-bloco 3: Seleção e Atalhos de Meses
+        # Sub-bloco 3: Atalhos e Seleção de Meses
         blk_meses = ctk.CTkFrame(row2, fg_color="transparent")
         blk_meses.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -1435,99 +1479,84 @@ class ModernPluggyApp(ctk.CTk):
         self.month_picker = MonthPickerPopover(self, self.btn_picker_mes, self.aplicar_mes)
         self.btn_picker_mes.configure(command=self.month_picker.toggle)
 
-        # ----------------------------------------------------
-        # LINHA 3: BOTÕES DE AÇÃO NA TERCEIRA LINHA (CENTRALIZADOS)
-        # ----------------------------------------------------
-        row3 = ctk.CTkFrame(card_filtros, fg_color="transparent")
-        row3.pack(fill=tk.X, padx=16, pady=(8, 14))
-
-        btns_container = ctk.CTkFrame(row3, fg_color="transparent")
-        btns_container.pack(anchor="center")
-
-        self.btn_buscar_contas = ctk.CTkButton(
-            btns_container,
-            text="1. Buscar Contas",
-            width=160,
-            height=38,
-            fg_color="#0284C7",
-            hover_color="#0369A1",
-            font=("Segoe UI", 12, "bold"),
-            command=self.acao_buscar_contas
-        )
-        self.btn_buscar_contas.pack(side=tk.LEFT, padx=(0, 10))
+        # Sub-bloco 4 (Direita): 2. Ver Transações
+        blk_ver_trans = ctk.CTkFrame(row2, fg_color="transparent")
+        blk_ver_trans.pack(side=tk.RIGHT, anchor="s")
 
         self.btn_ver_transacoes = ctk.CTkButton(
-            btns_container,
+            blk_ver_trans,
             text="2. Ver Transações",
             width=190,
             height=38,
             fg_color="#10B981",
             hover_color="#059669",
             font=("Segoe UI", 12, "bold"),
+            corner_radius=8,
             command=self.acao_buscar_transacoes
         )
-        self.btn_ver_transacoes.pack(side=tk.LEFT, padx=(0, 10))
+        self.btn_ver_transacoes.pack(side=tk.RIGHT)
 
-        self.btn_situacao_consent_t1 = ctk.CTkButton(
-            btns_container,
-            text="Situação Atual",
-            width=165,
-            height=38,
-            fg_color="#6366F1",
-            hover_color="#4F46E5",
-            font=("Segoe UI", 12, "bold"),
-            command=self.acao_ver_situacao_consent_tab1
-        )
-        self.btn_situacao_consent_t1.pack(side=tk.LEFT)
-
-        # 2. Banner de Status / Dicas com borda arredondada
-        self.banner_status = ctk.CTkFrame(self.tab_transacoes, fg_color="#1E293B", corner_radius=8, height=32)
-        self.banner_status.pack(fill=tk.X, padx=8, pady=(0, 8))
-
+        # Banner compacto de status / alertas (oculto por padrão ou slim)
+        self.banner_status = ctk.CTkFrame(self.tab_transacoes, fg_color="#1E293B", corner_radius=8, height=0)
         self.lbl_status_msg = ctk.CTkLabel(
             self.banner_status,
-            text="Insira o Item ID e clique em '1. Buscar Contas' ou '2. Ver Transações'.",
+            text="",
             font=("Segoe UI", 11),
             text_color="#94A3B8"
         )
-        self.lbl_status_msg.pack(side=tk.LEFT, padx=12, pady=4)
 
-        # 3. Grid de KPIs Modernos (4 Cards estilizados e limpos)
+        # ----------------------------------------------------
+        # 2. GRID DE KPIS MODERNOS CONFORME IMAGEM (4 CARDS)
+        # ----------------------------------------------------
         self.frame_kpis = ctk.CTkFrame(self.tab_transacoes, fg_color="transparent")
         self.frame_kpis.pack(fill=tk.X, padx=8, pady=(0, 10))
 
         for c in range(4):
             self.frame_kpis.columnconfigure(c, weight=1)
 
-        # Card 1: Total
-        card_total = ctk.CTkFrame(self.frame_kpis, fg_color="#111827", corner_radius=10, border_width=1, border_color="#1F2937")
-        card_total.grid(row=0, column=0, padx=(0, 5), sticky="nsew")
-        ctk.CTkLabel(card_total, text="TOTAL DE REGISTROS", font=("Segoe UI", 9, "bold"), text_color="#94A3B8").pack(anchor="w", padx=12, pady=(8, 0))
-        self.lbl_kpi_total = ctk.CTkLabel(card_total, text="0", font=("Segoe UI", 18, "bold"), text_color="#F8FAFC")
-        self.lbl_kpi_total.pack(anchor="w", padx=12, pady=(0, 8))
+        # Card 1: Total de Registros
+        card_total = ctk.CTkFrame(self.frame_kpis, fg_color="#0F172A", corner_radius=10, border_width=1, border_color="#1E293B")
+        card_total.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
+        top_c1 = ctk.CTkFrame(card_total, fg_color="transparent")
+        top_c1.pack(fill=tk.X, padx=14, pady=(10, 2))
+        ctk.CTkLabel(top_c1, text="TOTAL DE REGISTROS", font=("Segoe UI", 9, "bold"), text_color="#94A3B8").pack(side=tk.LEFT)
+        ctk.CTkLabel(top_c1, text="📊", font=("Segoe UI", 11), text_color="#64748B").pack(side=tk.RIGHT)
+        self.lbl_kpi_total = ctk.CTkLabel(card_total, text="0", font=("Segoe UI", 22, "bold"), text_color="#F8FAFC")
+        self.lbl_kpi_total.pack(anchor="w", padx=14, pady=(0, 10))
 
-        # Card 2: Entradas
-        card_ent = ctk.CTkFrame(self.frame_kpis, fg_color="#111827", corner_radius=10, border_width=1, border_color="#064E3B")
+        # Card 2: Entradas (Créditos)
+        card_ent = ctk.CTkFrame(self.frame_kpis, fg_color="#0A1D16", corner_radius=10, border_width=1, border_color="#059669")
         card_ent.grid(row=0, column=1, padx=4, sticky="nsew")
-        ctk.CTkLabel(card_ent, text="▲ ENTRADAS (CRÉDITOS)", font=("Segoe UI", 9, "bold"), text_color="#10B981").pack(anchor="w", padx=12, pady=(8, 0))
-        self.lbl_kpi_entradas = ctk.CTkLabel(card_ent, text="R$ 0,00", font=("Segoe UI", 18, "bold"), text_color="#34D399")
-        self.lbl_kpi_entradas.pack(anchor="w", padx=12, pady=(0, 8))
+        top_c2 = ctk.CTkFrame(card_ent, fg_color="transparent")
+        top_c2.pack(fill=tk.X, padx=14, pady=(10, 2))
+        ctk.CTkLabel(top_c2, text="▲ ENTRADAS (CRÉDITOS)", font=("Segoe UI", 9, "bold"), text_color="#10B981").pack(side=tk.LEFT)
+        ctk.CTkLabel(top_c2, text="↗", font=("Segoe UI", 12, "bold"), text_color="#10B981").pack(side=tk.RIGHT)
+        self.lbl_kpi_entradas = ctk.CTkLabel(card_ent, text="R$ 0,00", font=("Segoe UI", 22, "bold"), text_color="#34D399")
+        self.lbl_kpi_entradas.pack(anchor="w", padx=14, pady=(0, 10))
 
-        # Card 3: Saídas
-        card_sai = ctk.CTkFrame(self.frame_kpis, fg_color="#111827", corner_radius=10, border_width=1, border_color="#4C0519")
+        # Card 3: Saídas (Débitos)
+        card_sai = ctk.CTkFrame(self.frame_kpis, fg_color="#1F0D14", corner_radius=10, border_width=1, border_color="#E11D48")
         card_sai.grid(row=0, column=2, padx=4, sticky="nsew")
-        ctk.CTkLabel(card_sai, text="▼ SAÍDAS (DÉBITOS)", font=("Segoe UI", 9, "bold"), text_color="#F43F5E").pack(anchor="w", padx=12, pady=(8, 0))
-        self.lbl_kpi_saidas = ctk.CTkLabel(card_sai, text="R$ 0,00", font=("Segoe UI", 18, "bold"), text_color="#FB7185")
-        self.lbl_kpi_saidas.pack(anchor="w", padx=12, pady=(0, 8))
+        top_c3 = ctk.CTkFrame(card_sai, fg_color="transparent")
+        top_c3.pack(fill=tk.X, padx=14, pady=(10, 2))
+        ctk.CTkLabel(top_c3, text="▼ SAÍDAS (DÉBITOS)", font=("Segoe UI", 9, "bold"), text_color="#F43F5E").pack(side=tk.LEFT)
+        ctk.CTkLabel(top_c3, text="↗", font=("Segoe UI", 12, "bold"), text_color="#F43F5E").pack(side=tk.RIGHT)
+        self.lbl_kpi_saidas = ctk.CTkLabel(card_sai, text="R$ 0,00", font=("Segoe UI", 22, "bold"), text_color="#FB7185")
+        self.lbl_kpi_saidas.pack(anchor="w", padx=14, pady=(0, 10))
 
         # Card 4: Saldo Líquido
-        card_saldo = ctk.CTkFrame(self.frame_kpis, fg_color="#111827", corner_radius=10, border_width=1, border_color="#0C4A6E")
-        card_saldo.grid(row=0, column=3, padx=(5, 0), sticky="nsew")
-        ctk.CTkLabel(card_saldo, text="SALDO LÍQUIDO", font=("Segoe UI", 9, "bold"), text_color="#38BDF8").pack(anchor="w", padx=12, pady=(8, 0))
-        self.lbl_kpi_saldo = ctk.CTkLabel(card_saldo, text="R$ 0,00", font=("Segoe UI", 18, "bold"), text_color="#38BDF8")
-        self.lbl_kpi_saldo.pack(anchor="w", padx=12, pady=(0, 8))
+        card_saldo = ctk.CTkFrame(self.frame_kpis, fg_color="#0A1828", corner_radius=10, border_width=1, border_color="#0284C7")
+        card_saldo.grid(row=0, column=3, padx=(6, 0), sticky="nsew")
+        top_c4 = ctk.CTkFrame(card_saldo, fg_color="transparent")
+        top_c4.pack(fill=tk.X, padx=14, pady=(10, 2))
+        ctk.CTkLabel(top_c4, text="SALDO LÍQUIDO", font=("Segoe UI", 9, "bold"), text_color="#38BDF8").pack(side=tk.LEFT)
+        ctk.CTkLabel(top_c4, text="💳", font=("Segoe UI", 11), text_color="#38BDF8").pack(side=tk.RIGHT)
+        self.lbl_kpi_saldo = ctk.CTkLabel(card_saldo, text="R$ 0,00", font=("Segoe UI", 22, "bold"), text_color="#38BDF8")
+        self.lbl_kpi_saldo.pack(anchor="w", padx=14, pady=(0, 10))
 
-        # 4. Barra de Controles da Tabela / JSON
+        # ----------------------------------------------------
+        # 3. BARRA DE CONTROLES DA TABELA / JSON
+        # ----------------------------------------------------
         bar_view = ctk.CTkFrame(self.tab_transacoes, fg_color="transparent")
         bar_view.pack(fill=tk.X, padx=8, pady=(0, 8))
 
@@ -1541,17 +1570,24 @@ class ModernPluggyApp(ctk.CTk):
         self.seg_view_mode.set("Tabela Interativa")
         self.seg_view_mode.pack(side=tk.LEFT, padx=(0, 8))
 
+        frame_busca_t1 = ctk.CTkFrame(bar_view, fg_color="transparent")
+        frame_busca_t1.pack(side=tk.LEFT, padx=4)
+
         self.entry_busca_t1 = ctk.CTkEntry(
-            bar_view,
+            frame_busca_t1,
             placeholder_text="Filtrar registros ou JSON...",
-            width=240,
+            width=260,
             height=32,
             font=("Segoe UI", 11),
-            border_color="#1F2937"
+            border_color="#1F2937",
+            fg_color="#162032"
         )
-        self.entry_busca_t1.pack(side=tk.LEFT, padx=4)
+        self.entry_busca_t1.pack(side=tk.LEFT)
         self.entry_busca_t1.bind("<KeyRelease>", lambda e: self.acao_buscar_t1())
         self.entry_busca_t1.bind("<Return>", lambda e: self.localizar_proximo_json_t1())
+
+        lbl_lupa = ctk.CTkLabel(frame_busca_t1, text="🔍", font=("Segoe UI", 10), text_color="#64748B")
+        lbl_lupa.pack(side=tk.LEFT, padx=(4, 0))
 
         self.btn_prev_json_t1 = ctk.CTkButton(bar_view, text="▲", width=30, height=32, fg_color="#1E293B", hover_color="#334155", command=self.localizar_anterior_json_t1)
         self.btn_next_json_t1 = ctk.CTkButton(bar_view, text="▼", width=30, height=32, fg_color="#1E293B", hover_color="#334155", command=self.localizar_proximo_json_t1)
@@ -1583,13 +1619,43 @@ class ModernPluggyApp(ctk.CTk):
         )
         self.btn_exportar.pack(side=tk.RIGHT, padx=4)
 
-        # 5. Container de Dados: sem borda branca, cores totalmente integradas
+        # ----------------------------------------------------
+        # 4. CONTAINER DE DADOS (TABELA E JSON)
+        # ----------------------------------------------------
         self.container_dados = ctk.CTkFrame(self.tab_transacoes, fg_color="transparent")
         self.container_dados.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
 
         # Frame da Tabela sem borda branca (borda sutil dark #1F2937)
         self.frame_tabela = ctk.CTkFrame(self.container_dados, fg_color="#111827", corner_radius=8, border_width=1, border_color="#1F2937")
         self.frame_tabela.pack(fill=tk.BOTH, expand=True)
+
+        # Empty State estilizado dentro da tabela conforme imagem
+        self.frame_empty_tabela = ctk.CTkFrame(self.frame_tabela, fg_color="#111827", corner_radius=0)
+        self.frame_empty_tabela.place(relx=0.5, rely=0.55, anchor="center")
+
+        img_empty = self.obter_empty_state_image((54, 54))
+        if img_empty:
+            lbl_empty_icon = ctk.CTkLabel(self.frame_empty_tabela, text="", image=img_empty)
+            lbl_empty_icon.pack(pady=(0, 8))
+        else:
+            lbl_empty_icon = ctk.CTkLabel(self.frame_empty_tabela, text="📄🔍", font=("Segoe UI", 36), text_color="#64748B")
+            lbl_empty_icon.pack(pady=(0, 8))
+
+        lbl_empty_titulo = ctk.CTkLabel(
+            self.frame_empty_tabela,
+            text="Nenhum registro encontrado",
+            font=("Segoe UI", 13, "bold"),
+            text_color="#E2E8F0"
+        )
+        lbl_empty_titulo.pack(pady=(0, 2))
+
+        lbl_empty_sub = ctk.CTkLabel(
+            self.frame_empty_tabela,
+            text="Nenhum registro encontrado, aguardando consulta ou filtros aplicados.",
+            font=("Segoe UI", 10),
+            text_color="#64748B"
+        )
+        lbl_empty_sub.pack()
 
         self.scroll_tree_y = ctk.CTkScrollbar(
             self.frame_tabela,
@@ -1686,10 +1752,18 @@ class ModernPluggyApp(ctk.CTk):
 
     def exibir_alerta(self, titulo, mensagem, cor="#1E293B"):
         """Exibe uma mensagem no banner de status da janela"""
-        self.banner_status.configure(fg_color=cor)
         texto_completo = f"{titulo}: {mensagem}" if mensagem else titulo
         cor_texto = "#FFFFFF" if cor != "#1E293B" else "#94A3B8"
-        self.lbl_status_msg.configure(text=texto_completo, text_color=cor_texto)
+        if hasattr(self, 'lbl_status_msg'):
+            self.lbl_status_msg.configure(text=texto_completo, text_color=cor_texto)
+        if hasattr(self, 'banner_status') and cor != "#1E293B":
+            self.banner_status.configure(fg_color=cor)
+            try:
+                self.banner_status.pack(fill=tk.X, padx=8, pady=(0, 6), before=self.frame_kpis)
+                self.lbl_status_msg.pack(side=tk.LEFT, padx=12, pady=4)
+                self.after(5000, lambda: self.banner_status.pack_forget())
+            except Exception:
+                pass
 
     def setup_aba_diagnostico(self):
         # 1. Painel Superior de Controles e Busca
@@ -2399,7 +2473,7 @@ class ModernPluggyApp(ctk.CTk):
 
         self.entry_consent_id.delete(0, tk.END)
         self.entry_consent_id.insert(0, id_final)
-        self.tabview.set("  Situação do Consentimento  ")
+        self.tabview.set("Situação do Consentimento")
         self.acao_consultar_situacao_tab3()
 
     def acao_buscar_t2(self):
@@ -2731,7 +2805,11 @@ class ModernPluggyApp(ctk.CTk):
             self.lbl_busca_status_t1.pack_forget()
             self.frame_tabela.pack(fill=tk.BOTH, expand=True)
             self.acao_buscar_t1()
+            if not self.current_transactions and hasattr(self, 'frame_empty_tabela'):
+                self.frame_empty_tabela.place(relx=0.5, rely=0.55, anchor="center")
         else:
+            if hasattr(self, 'frame_empty_tabela'):
+                self.frame_empty_tabela.place_forget()
             self.frame_tabela.pack_forget()
             self.btn_prev_json_t1.pack(side=tk.LEFT, padx=2)
             self.btn_next_json_t1.pack(side=tk.LEFT, padx=2)
@@ -2739,12 +2817,113 @@ class ModernPluggyApp(ctk.CTk):
             self.frame_json.pack(fill=tk.BOTH, expand=True)
             self.acao_buscar_t1()
 
+    # ==========================================
+    # SINCRONIZAÇÃO ENTRE ABAS E PESQUISA AUTOMÁTICA
+    # ==========================================
+    def _criar_menu_contexto_entry(self, entry_widget):
+        menu = tk.Menu(entry_widget, tearoff=0, bg="#1E293B", fg="#F8FAFC", activebackground="#0284C7", activeforeground="#FFFFFF", bd=0)
+        menu.add_command(label="Copiar", command=lambda: entry_widget.event_generate("<<Copy>>"))
+        def colar_e_processar():
+            entry_widget.event_generate("<<Paste>>")
+            self.after(50, self._processar_sincronizacao_item_id)
+        menu.add_command(label="Colar e Pesquisar em Todas as Abas", command=colar_e_processar)
+        menu.add_command(label="Limpar", command=lambda: entry_widget.delete(0, tk.END))
+
+        def popup(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        entry_widget.bind("<Button-3>", popup)
+
+    def _ao_colar_item_id(self, event=None):
+        """Disparado quando o usuário cola algo no campo de Item ID"""
+        self.after(50, self._processar_sincronizacao_item_id)
+
+    def _ao_mudar_item_id_debounce(self, event=None):
+        """Detecta digitação ou preenchimento de UUID completo com debounce"""
+        if hasattr(self, '_debounce_timer') and self._debounce_timer:
+            self.after_cancel(self._debounce_timer)
+        self._debounce_timer = self.after(350, self._verificar_auto_pesquisa_item_id)
+
+    def _verificar_auto_pesquisa_item_id(self):
+        val = self.entry_item_id.get().strip().strip("'\"")
+        if len(val) >= 30 and getattr(self, '_last_auto_searched_id', None) != val:
+            self._processar_sincronizacao_item_id()
+
+    def _processar_sincronizacao_item_id(self):
+        raw_val = self.entry_item_id.get().strip()
+        clean_val = re.sub(r'^(?:item_?id\s*[:=]\s*|account_?id\s*[:=]\s*)', '', raw_val, flags=re.IGNORECASE).strip("'\" \t\r\n")
+        if clean_val != raw_val:
+            self.entry_item_id.delete(0, tk.END)
+            self.entry_item_id.insert(0, clean_val)
+
+        if len(clean_val) >= 8:
+            self.sincronizar_e_pesquisar_tudo(clean_val)
+
+    def sincronizar_e_pesquisar_tudo(self, item_id):
+        """Sincroniza o ID colado para todas as abas e dispara as pesquisas em paralelo"""
+        if not item_id:
+            return
+        if getattr(self, '_last_auto_searched_id', None) == item_id:
+            return
+        self._last_auto_searched_id = item_id
+
+        # 1. Atualizar e disparar pesquisa na Aba 2 (Diagnóstico de Item)
+        if hasattr(self, 'entry_diag_item_id'):
+            self.entry_diag_item_id.delete(0, tk.END)
+            self.entry_diag_item_id.insert(0, item_id)
+            self._last_diag_searched_id = item_id
+            try:
+                self.acao_diagnosticar_item()
+            except Exception as e:
+                print("Erro ao disparar diagnóstico automático:", e)
+
+        # 2. Atualizar e disparar pesquisa na Aba 3 (Situação do Consentimento)
+        if hasattr(self, 'entry_consent_id'):
+            self.entry_consent_id.delete(0, tk.END)
+            self.entry_consent_id.insert(0, item_id)
+            self._last_consent_searched_id = item_id
+            try:
+                self.acao_consultar_situacao_tab3()
+            except Exception as e:
+                print("Erro ao disparar consulta de consentimento automática:", e)
+
+        # 3. Disparar busca de contas na Aba 1 (Explorer de Transações)
+        try:
+            self.acao_buscar_contas()
+        except Exception as e:
+            print("Erro ao disparar busca de contas automática:", e)
+
     def acao_buscar_contas(self):
         item_id = self.entry_item_id.get().strip().strip("'\"")
         if not item_id:
             self.exibir_alerta("Aviso", "Por favor, insira o Item ID ou Conta ID para buscar.", cor="#F59E0B")
             messagebox.showwarning("Aviso", "Por favor, insira o Item ID.", parent=self)
             return
+
+        # Sincroniza e garante pesquisa nas outras abas
+        if hasattr(self, 'entry_diag_item_id'):
+            if self.entry_diag_item_id.get().strip() != item_id:
+                self.entry_diag_item_id.delete(0, tk.END)
+                self.entry_diag_item_id.insert(0, item_id)
+            if getattr(self, '_last_diag_searched_id', None) != item_id:
+                self._last_diag_searched_id = item_id
+                try:
+                    self.acao_diagnosticar_item()
+                except Exception:
+                    pass
+
+        if hasattr(self, 'entry_consent_id'):
+            if self.entry_consent_id.get().strip() != item_id:
+                self.entry_consent_id.delete(0, tk.END)
+                self.entry_consent_id.insert(0, item_id)
+            if getattr(self, '_last_consent_searched_id', None) != item_id:
+                self._last_consent_searched_id = item_id
+                try:
+                    self.acao_consultar_situacao_tab3()
+                except Exception:
+                    pass
 
         self.btn_buscar_contas.configure(text="Buscando...", state="disabled")
         self.exibir_alerta("Conectando", f"Buscando contas para o item {item_id[:16]}...", cor="#0284C7")
@@ -3084,6 +3263,13 @@ class ModernPluggyApp(ctk.CTk):
             self.tree.delete(item)
 
         dados = lista_filtrada if lista_filtrada is not None else self.current_transactions
+        if not dados:
+            if hasattr(self, 'frame_empty_tabela'):
+                self.frame_empty_tabela.place(relx=0.5, rely=0.55, anchor="center")
+        else:
+            if hasattr(self, 'frame_empty_tabela'):
+                self.frame_empty_tabela.place_forget()
+
         for i, t in enumerate(dados):
             if not isinstance(t, dict):
                 continue
@@ -3554,7 +3740,8 @@ class ModernPluggyApp(ctk.CTk):
             )
             return
 
-        self.btn_situacao_consent_t1.configure(text="Consultando...", state="disabled")
+        if hasattr(self, 'btn_situacao_consent_t1'):
+            self.btn_situacao_consent_t1.configure(text="Consultando...", state="disabled")
 
         def worker():
             try:
@@ -3563,7 +3750,8 @@ class ModernPluggyApp(ctk.CTk):
                 info = analisar_situacao_consentimento(data)
 
                 def atualizar():
-                    self.btn_situacao_consent_t1.configure(text="Situação Atual", state="normal")
+                    if hasattr(self, 'btn_situacao_consent_t1'):
+                        self.btn_situacao_consent_t1.configure(text="Situação Atual", state="normal")
                     self.lbl_status_msg.configure(
                         text=f"Situação do Consentimento: {info['status_titulo']} | Expira: {info['expires_str']}",
                         text_color=info['cor_status']
@@ -3578,7 +3766,8 @@ class ModernPluggyApp(ctk.CTk):
                 self.safe_after(0, atualizar)
             except Exception as e:
                 def on_err():
-                    self.btn_situacao_consent_t1.configure(text="Situação Atual", state="normal")
+                    if hasattr(self, 'btn_situacao_consent_t1'):
+                        self.btn_situacao_consent_t1.configure(text="Situação Atual", state="normal")
                     messagebox.showerror("Erro ao Consultar Situação", str(e), parent=self)
                 self.safe_after(0, on_err)
 
@@ -3591,7 +3780,7 @@ class ModernPluggyApp(ctk.CTk):
         if id_busca:
             self.entry_consent_id.delete(0, tk.END)
             self.entry_consent_id.insert(0, id_busca)
-        self.tabview.set("  Situação do Consentimento  ")
+        self.tabview.set("Situação do Consentimento")
         if id_busca:
             self.acao_consultar_situacao_tab3()
 
@@ -3972,6 +4161,167 @@ class ModernPluggyApp(ctk.CTk):
             command=salvar_e_testar
         )
         btn_salvar.pack(padx=20, pady=8, fill=tk.X)
+
+        # Seção de Versão e Atualização
+        sep_update = ctk.CTkFrame(janela, height=1, fg_color="#1F2937")
+        sep_update.pack(fill=tk.X, padx=20, pady=(16, 12))
+
+        frame_ver = ctk.CTkFrame(janela, fg_color="transparent")
+        frame_ver.pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        lbl_versao = ctk.CTkLabel(frame_ver, text=f"Versão Instalada: v{APP_VERSION}", font=("Segoe UI", 11), text_color="#94A3B8")
+        lbl_versao.pack(side=tk.LEFT)
+
+        btn_verif_update = ctk.CTkButton(
+            frame_ver,
+            text="🔄 Verificar Atualizações",
+            width=175,
+            height=32,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 11, "bold"),
+            border_width=1,
+            border_color="#334155",
+            command=lambda: threading.Thread(target=lambda: self.verificar_atualizacoes(silencioso=False), daemon=True).start()
+        )
+        btn_verif_update.pack(side=tk.RIGHT)
+
+    def verificar_atualizacoes(self, silencioso=False):
+        """Verifica se há novas versões disponíveis no GitHub Releases"""
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "PluggyExplorer"}
+            res = requests.get(url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                rel = res.json()
+                tag_raw = rel.get("tag_name", "")
+                tag_clean = tag_raw.lstrip("vV")
+
+                def extrair_versao(v_str):
+                    parts = re.findall(r'\d+', v_str)
+                    return tuple(int(p) for p in parts) if parts else (0,)
+
+                ver_remota = extrair_versao(tag_clean)
+                ver_local = extrair_versao(APP_VERSION)
+
+                if ver_remota > ver_local:
+                    assets = rel.get("assets", [])
+                    exe_url = None
+                    for a in assets:
+                        if a.get("name", "").lower().endswith(".exe"):
+                            exe_url = a.get("browser_download_url")
+                            break
+                    corpo_notas = rel.get("body", "Melhorias de desempenho e estabilidade.")
+                    html_url = rel.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+                    def perguntar():
+                        msg = (
+                            f"Uma nova versão (v{tag_clean}) do Pluggy Explorer está disponível!\n\n"
+                            f"Versão atual instalada: v{APP_VERSION}\n"
+                            f"Nova versão encontrada: v{tag_clean}\n\n"
+                            f"Notas da versão:\n{corpo_notas[:300]}\n\n"
+                            f"Deseja atualizar automaticamente agora?"
+                        )
+                        if messagebox.askyesno("Atualização Encontrada", msg, parent=self):
+                            if getattr(sys, 'frozen', False) and exe_url:
+                                self.baixar_e_instalar_atualizacao(exe_url, tag_clean)
+                            else:
+                                webbrowser.open(html_url)
+
+                    self.safe_after(0, perguntar)
+                elif not silencioso:
+                    self.safe_after(0, lambda: messagebox.showinfo(
+                        "Atualizações",
+                        f"O Pluggy Explorer já está atualizado!\nVersão instalada: v{APP_VERSION}",
+                        parent=self
+                    ))
+            elif not silencioso:
+                self.safe_after(0, lambda: messagebox.showinfo(
+                    "Atualizações",
+                    f"Versão atual: v{APP_VERSION}.\nNenhuma atualização disponível no momento.",
+                    parent=self
+                ))
+        except Exception as e:
+            if not silencioso:
+                self.safe_after(0, lambda err=str(e): messagebox.showwarning(
+                    "Verificação de Atualização",
+                    f"Não foi possível verificar atualizações no momento:\n{err}",
+                    parent=self
+                ))
+
+    def baixar_e_instalar_atualizacao(self, download_url, versao_tag):
+        """Baixa o novo executável e executa a substituição suave"""
+        prog_win = ctk.CTkToplevel(self)
+        prog_win.title("Baixando Atualização...")
+        prog_win.geometry("400x160")
+        prog_win.transient(self)
+        prog_win.grab_set()
+
+        lbl = ctk.CTkLabel(prog_win, text=f"Baixando nova versão v{versao_tag}...", font=("Segoe UI", 12, "bold"))
+        lbl.pack(pady=(20, 10))
+
+        bar = ctk.CTkProgressBar(prog_win, width=320)
+        bar.set(0)
+        bar.pack(pady=10)
+
+        lbl_status = ctk.CTkLabel(prog_win, text="Iniciando download...", font=("Segoe UI", 10), text_color="#94A3B8")
+        lbl_status.pack()
+
+        def worker():
+            try:
+                exe_path = sys.executable
+                exe_dir = os.path.dirname(os.path.abspath(exe_path))
+                temp_exe = os.path.join(exe_dir, "PluggyExplorer_new.exe")
+                bat_path = os.path.join(exe_dir, "aplicar_update.bat")
+
+                res = requests.get(download_url, stream=True, timeout=60)
+                res.raise_for_status()
+                total_size = int(res.headers.get("content-length", 0))
+                downloaded = 0
+
+                with open(temp_exe, "wb") as f:
+                    for chunk in res.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                frac = downloaded / total_size
+                                self.safe_after(0, lambda p=frac: bar.set(p))
+                                mb_down = downloaded / (1024 * 1024)
+                                mb_tot = total_size / (1024 * 1024)
+                                self.safe_after(0, lambda s=f"{mb_down:.1f} MB / {mb_tot:.1f} MB": lbl_status.configure(text=s))
+
+                bat_content = f"""@echo off
+timeout /t 2 /nobreak > nul
+:loop
+del /f /q "{exe_path}" > nul 2>&1
+if exist "{exe_path}" (
+    timeout /t 1 /nobreak > nul
+    goto loop
+)
+move /y "{temp_exe}" "{exe_path}" > nul
+start "" "{exe_path}"
+del "%~f0"
+exit
+"""
+                with open(bat_path, "w", encoding="utf-8") as f_bat:
+                    f_bat.write(bat_content)
+
+                import subprocess
+                flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+                subprocess.Popen(["cmd.exe", "/c", bat_path], creationflags=flags)
+
+                self.safe_after(0, self.destroy)
+                sys.exit(0)
+            except Exception as e:
+                self.safe_after(0, lambda err=str(e): messagebox.showerror(
+                    "Erro ao Atualizar",
+                    f"Falha durante o download da atualização:\n{err}",
+                    parent=self
+                ))
+                self.safe_after(0, prog_win.destroy)
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 if __name__ == "__main__":
