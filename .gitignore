@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.exe
+
+# Sensible configuration / credentials
+config.json
+
+# IDEs & System
+.vscode/
+.idea/
+*.swp
+*.bak
+Thumbs.db
+desktop.ini
