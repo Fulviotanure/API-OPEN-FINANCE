@@ -6,7 +6,7 @@ echo ========================================================
 echo.
 cd /d "%~dp0"
 echo Executando PyInstaller...
-python -m PyInstaller --noconsole --onefile --icon="app_icon.ico" --name="PluggyExplorer" --collect-all customtkinter app_explorer.py
+python -m PyInstaller --noconfirm --noconsole --onefile --icon="app_icon.ico" --name="PluggyExplorer" --collect-all customtkinter --add-data "documentacao_pluggy_bancos.json;." app_explorer.py
 echo.
 if exist "dist\PluggyExplorer.exe" (
     echo [SUCESSO] Executavel gerado em dist\PluggyExplorer.exe!
