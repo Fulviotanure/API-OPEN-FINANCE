@@ -46,8 +46,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.4.0' }}
-          name: Release ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.4.0' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.4.1' }}
+          name: Release ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.4.1' }}
           draft: false
           prerelease: false
           generate_release_notes: true
