@@ -67,7 +67,7 @@ PLUGGY_BASE_URL = "https://api.pluggy.ai"
 PLUGGY_STATUS_BASE_URL = "https://status.pluggy.ai"
 DEFAULT_CLIENT_ID = "fe96af16-0c23-44e6-8d0a-57223694b760"
 DEFAULT_CLIENT_SECRET = "f7c14c58-f0d0-4947-8423-721548882db7"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 GITHUB_REPO = "Fulviotanure/API-OPEN-FINANCE"
 
 
@@ -473,6 +473,49 @@ APELIDOS_BANCOS = {
     "avenue": "Avenue",
     "original": "Banco Original"
 }
+
+def obter_caminho_recurso(nome_arquivo):
+    """
+    Retorna o caminho absoluto do recurso, suportando execução local (.py)
+    e congelada via PyInstaller (sys._MEIPASS).
+    """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        caminho_meipass = os.path.join(sys._MEIPASS, nome_arquivo)
+        if os.path.exists(caminho_meipass):
+            return caminho_meipass
+    caminho_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), nome_arquivo)
+    if os.path.exists(caminho_script):
+        return caminho_script
+    return os.path.abspath(nome_arquivo)
+
+def carregar_documentacao_pluggy():
+    """Carrega os dados dos conectores PJ e legendas da planilha oficial da Pluggy."""
+    caminho = obter_caminho_recurso("documentacao_pluggy_bancos.json")
+    if os.path.exists(caminho):
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Erro ao carregar documentacao_pluggy_bancos.json: {e}")
+    return {
+        "url_planilha": "https://docs.google.com/spreadsheets/d/1AfMrzIRVJ-L-avqsGG26XEz8RsRanmjhp5NYQai5ysg/edit?usp=drivesdk",
+        "id_planilha": "1AfMrzIRVJ-L-avqsGG26XEz8RsRanmjhp5NYQai5ysg",
+        "total_conectores": 0,
+        "ultima_atualizacao": "",
+        "legenda": [],
+        "conectores": []
+    }
+
+def salvar_documentacao_pluggy(dados):
+    """Persiste a documentação dos conectores no arquivo JSON local."""
+    caminho = obter_caminho_recurso("documentacao_pluggy_bancos.json")
+    try:
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Erro ao salvar documentacao_pluggy_bancos.json: {e}")
+        return False
 
 def normalizar_texto_busca(s):
     """Remove acentos, espaços e caracteres especiais para busca insensível."""
@@ -2095,6 +2138,15 @@ class ModernPluggyApp(ctk.CTk):
         self._status_last_loaded_time = None
         self._instituicao_ativa_info = None
 
+        # Documentação & Conectores PJ (Homologação Pluggy)
+        self.doc_pluggy_dados = carregar_documentacao_pluggy()
+        self.item_capturado_doc = None
+        self._filtro_doc_texto = ""
+        self._filtro_doc_status = "Todos"
+        self._filtro_doc_conexao = "Todas"
+        self._filtro_doc_recurso = "Todos"
+        self._filtro_doc_debounce = None
+
         # Estado do Sistema de Atualizações Automáticas em Segundo Plano
         self._is_updating = False
         self._update_download_progress = 0.0
@@ -2966,7 +3018,7 @@ class ModernPluggyApp(ctk.CTk):
         self.tab_diagnostico = self.tabview.add("Diagnóstico de Item (Erros)")
         self.tab_consentimento = self.tabview.add("Situação do Consentimento")
         self.tab_status_bancos = self.tabview.add("Status dos Bancos & Conectores")
-        self.tab_docs_recursos = self.tabview.add("Docs & Novos Recursos")
+        self.tab_docs_recursos = self.tabview.add("Documentação & Conectores PJ")
 
         self.setup_aba_transacoes()
         self.setup_aba_diagnostico()
@@ -3880,6 +3932,20 @@ class ModernPluggyApp(ctk.CTk):
         row_c_top = ctk.CTkFrame(self.card_diag_contas, fg_color="transparent")
         row_c_top.pack(fill=tk.X, padx=16, pady=(12, 4))
         ctk.CTkLabel(row_c_top, text="🏦 INSTITUIÇÃO & CONTAS BANCÁRIAS VINCULADAS", font=("Segoe UI", 11, "bold"), text_color="#94A3B8").pack(side=tk.LEFT)
+
+        self.btn_diag_ver_doc = ctk.CTkButton(
+            row_c_top,
+            text="📋 Ver Recursos na Doc ↗",
+            height=26,
+            width=175,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10, "bold"),
+            border_width=1,
+            border_color="#334155",
+            command=self.acao_abrir_doc_do_diag
+        )
+        self.btn_diag_ver_doc.pack(side=tk.RIGHT)
 
         self.lbl_contas_banco_info = ctk.CTkLabel(
             self.card_diag_contas,
@@ -5475,242 +5541,1054 @@ class ModernPluggyApp(ctk.CTk):
             btn_web.pack(side=tk.RIGHT)
 
     # =========================================================================
-    # ABA: DOCUMENTAÇÃO OFICIAL DA PLUGGY, ATUALIZAÇÕES & RECURSOS
+    # ABA: DOCUMENTAÇÃO & CONECTORES PJ (HOMOLOGAÇÃO PLUGGY)
     # =========================================================================
     def setup_aba_docs_recursos(self):
-        """Monta a aba com link para documentação oficial, acompanhamento de novos conectores e recursos da Pluggy"""
-        scroll = ctk.CTkScrollableFrame(self.tab_docs_recursos, fg_color="transparent")
-        scroll.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        """
+        Monta a aba oficial: 'Documentação & Conectores PJ'
+        - Header Banner com links rápidos, Sincronização ao Vivo, Planilha Oficial e Modal de Legenda.
+        - Card em destaque: ⚡ Banco do Item Atual (captura automática por Item ID).
+        - Barra de pesquisa em tempo real e filtros rápidos (Status, Conexão, Recursos).
+        - Tabela completa de conectores PJ com colunas idênticas à planilha oficial.
+        - Card inferior com detalhes técnicos do conector selecionado e ações rápidas.
+        """
+        container = ctk.CTkFrame(self.tab_docs_recursos, fg_color="transparent")
+        container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # 1. Card Banner Superior: Documentação Oficial
-        card_header = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
-        card_header.pack(fill=tk.X, pady=(0, 12))
+        # 1. Header Card: Título, Legenda e Links Rápidos
+        card_header = ctk.CTkFrame(container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
+        card_header.pack(fill=tk.X, pady=(0, 8))
 
         row_h = ctk.CTkFrame(card_header, fg_color="transparent")
-        row_h.pack(fill=tk.X, padx=18, pady=16)
+        row_h.pack(fill=tk.X, padx=16, pady=12)
 
         col_h_info = ctk.CTkFrame(row_h, fg_color="transparent")
         col_h_info.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ctk.CTkLabel(
             col_h_info,
-            text="Documentação Oficial Pluggy (Brasil) & Novos Recursos",
+            text="Documentação & Conectores PJ",
             font=("Segoe UI", 16, "bold"),
             text_color="#FFFFFF"
         ).pack(anchor="w")
 
-        ctk.CTkLabel(
+        total_conns = len(self.doc_pluggy_dados.get('conectores', []))
+        self.lbl_doc_subtitulo = ctk.CTkLabel(
             col_h_info,
-            text="Consulte a referência técnica oficial em português para acompanhar o suporte a novos bancos, APIs e atualizações da plataforma Open Finance.",
+            text=f"Referência técnica dinâmica da planilha oficial e conectores empresariais Pluggy Open Finance. ({total_conns} homologados)",
             font=("Segoe UI", 11),
             text_color="#94A3B8"
-        ).pack(anchor="w", pady=(3, 0))
-
-        col_h_btn = ctk.CTkFrame(row_h, fg_color="transparent")
-        col_h_btn.pack(side=tk.RIGHT, padx=(10, 0))
-
-        btn_open_portal = ctk.CTkButton(
-            col_h_btn,
-            text="🌐 Acessar docs.pluggy.ai/pt ↗",
-            height=36,
-            fg_color="#0284C7",
-            hover_color="#0369A1",
-            font=("Segoe UI", 11, "bold"),
-            command=lambda: webbrowser.open("https://docs.pluggy.ai/pt")
         )
-        btn_open_portal.pack(side=tk.RIGHT)
+        self.lbl_doc_subtitulo.pack(anchor="w", pady=(2, 0))
 
-        # 2. Card: Verificador de Novos Conectores na API em Tempo Real
-        card_checker = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
-        card_checker.pack(fill=tk.X, pady=(0, 12))
+        col_h_btns = ctk.CTkFrame(row_h, fg_color="transparent")
+        col_h_btns.pack(side=tk.RIGHT)
 
-        pad_ch = ctk.CTkFrame(card_checker, fg_color="transparent")
-        pad_ch.pack(fill=tk.X, padx=18, pady=16)
-
-        ctk.CTkLabel(
-            pad_ch,
-            text="🔍 Verificar Disponibilidade de Conectores na API em Tempo Real",
-            font=("Segoe UI", 13, "bold"),
-            text_color="#F8FAFC"
-        ).pack(anchor="w")
-
-        ctk.CTkLabel(
-            pad_ch,
-            text="Consulte se uma instituição (como Cresol, cooperativas ou bancos digitais) já possui conector disponível para agregação na API da Pluggy:",
-            font=("Segoe UI", 11),
-            text_color="#94A3B8"
-        ).pack(anchor="w", pady=(2, 10))
-
-        row_search = ctk.CTkFrame(pad_ch, fg_color="transparent")
-        row_search.pack(fill=tk.X, pady=(0, 8))
-
-        self.entry_check_connector = ctk.CTkEntry(
-            row_search,
-            placeholder_text="Digite o nome da instituição (ex: Cresol, Nubank, Sicredi, Inter...)",
-            height=36,
-            font=("Segoe UI", 11),
-            border_color="#1F2937"
-        )
-        self.entry_check_connector.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        self.entry_check_connector.insert(0, "Cresol")
-        self.entry_check_connector.bind("<Return>", lambda e: self.verificar_conector_api())
-
-        self.btn_checar_conector = ctk.CTkButton(
-            row_search,
-            text="🔍 Consultar na API",
-            height=36,
-            width=150,
-            fg_color="#0284C7",
-            hover_color="#0369A1",
-            font=("Segoe UI", 11, "bold"),
-            command=self.verificar_conector_api
-        )
-        self.btn_checar_conector.pack(side=tk.LEFT, padx=(0, 8))
-
-        btn_ver_todos = ctk.CTkButton(
-            row_search,
-            text="📋 Ver Lista Oficial no Portal ↗",
-            height=36,
-            width=210,
-            fg_color="#1E293B",
-            hover_color="#334155",
-            font=("Segoe UI", 11),
-            border_width=1,
-            border_color="#334155",
-            command=lambda: webbrowser.open("https://docs.pluggy.ai/pt/reference/connectors/connectors-list")
-        )
-        btn_ver_todos.pack(side=tk.LEFT)
-
-        # Container onde é exibido o resultado da consulta
-        self.frame_resultado_conector = ctk.CTkFrame(pad_ch, fg_color="transparent")
-        self.frame_resultado_conector.pack(fill=tk.X, pady=(4, 0))
-
-        # 3. Card: Seções e Guias da Documentação Oficial
-        card_guias = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
-        card_guias.pack(fill=tk.X, pady=(0, 12))
-
-        pad_g = ctk.CTkFrame(card_guias, fg_color="transparent")
-        pad_g.pack(fill=tk.X, padx=18, pady=16)
-
-        ctk.CTkLabel(
-            pad_g,
-            text="📚 Guias & Tópicos da Documentação Pluggy",
-            font=("Segoe UI", 13, "bold"),
-            text_color="#F8FAFC"
-        ).pack(anchor="w", pady=(0, 10))
-
-        guias = [
-            (
-                "Documentação Geral & Primeiros Passos",
-                "Visão geral dos recursos, conceitos de Items, Accounts, Transactions e Identity.",
-                "https://docs.pluggy.ai/pt",
-                "🌐 Acessar Portal Geral"
-            ),
-            (
-                "Conectores Homologados & Parâmetros de Login",
-                "Consulte os requisitos específicos de autenticação e credenciais de cada instituição bancária.",
-                "https://docs.pluggy.ai/pt/reference/connectors/connectors-list",
-                "🏦 Ver Conectores"
-            ),
-            (
-                "Iniciação de Pagamentos (Pix Open Finance)",
-                "Documentação para pagamentos instantâneos, transferências Pix e bancos suportados (incluindo Cresol Empresas).",
-                "https://docs.pluggy.ai/pt/reference/payments",
-                "💳 Ver Pagamentos"
-            ),
-            (
-                "Situação e Renovação de Consentimento",
-                "Regras e endpoints para consultar expiração e renovar consentimentos de usuários finais.",
-                "https://docs.pluggy.ai/pt/reference/consent/consent-retrieve",
-                "🔐 Ver Consentimentos"
-            ),
-            (
-                "Status da Rede & Incidentes em Tempo Real",
-                "Página oficial de saúde operacional dos conectores e componentes da Pluggy.",
-                "https://status.pluggy.ai",
-                "⚡ Ver status.pluggy.ai"
-            )
-        ]
-
-        for tit, desc, url, btn_txt in guias:
-            row_guia = ctk.CTkFrame(pad_g, fg_color="#0B0F19", corner_radius=8, border_width=1, border_color="#1E293B")
-            row_guia.pack(fill=tk.X, pady=4)
-
-            inner_g = ctk.CTkFrame(row_guia, fg_color="transparent")
-            inner_g.pack(fill=tk.X, padx=14, pady=10)
-
-            col_gtxt = ctk.CTkFrame(inner_g, fg_color="transparent")
-            col_gtxt.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-            ctk.CTkLabel(
-                col_gtxt,
-                text=tit,
-                font=("Segoe UI", 11, "bold"),
-                text_color="#38BDF8"
-            ).pack(anchor="w")
-
-            ctk.CTkLabel(
-                col_gtxt,
-                text=desc,
-                font=("Segoe UI", 10),
-                text_color="#94A3B8"
-            ).pack(anchor="w", pady=(1, 0))
-
-            btn_g = ctk.CTkButton(
-                inner_g,
-                text=f"{btn_txt} ↗",
-                width=180,
-                height=30,
-                fg_color="#1E293B",
-                hover_color="#334155",
-                font=("Segoe UI", 10, "bold"),
-                border_width=1,
-                border_color="#334155",
-                command=lambda u=url: webbrowser.open(u)
-            )
-            btn_g.pack(side=tk.RIGHT, padx=(10, 0))
-
-        # 4. Card: Versão do Pluggy Explorer & Atualizações do Software
-        card_app_ver = ctk.CTkFrame(scroll, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1F2937")
-        card_app_ver.pack(fill=tk.X, pady=(0, 6))
-
-        pad_av = ctk.CTkFrame(card_app_ver, fg_color="transparent")
-        pad_av.pack(fill=tk.X, padx=18, pady=14)
-
-        row_av = ctk.CTkFrame(pad_av, fg_color="transparent")
-        row_av.pack(fill=tk.X)
-
-        col_av_info = ctk.CTkFrame(row_av, fg_color="transparent")
-        col_av_info.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        ctk.CTkLabel(
-            col_av_info,
-            text=f"Pluggy Explorer  v{APP_VERSION}",
-            font=("Segoe UI", 12, "bold"),
-            text_color="#F8FAFC"
-        ).pack(anchor="w")
-
-        self.lbl_docs_update_status = ctk.CTkLabel(
-            col_av_info,
-            text="Verificação contínua de atualizações no GitHub ativa",
-            font=("Segoe UI", 10),
-            text_color="#10B981"
-        )
-        self.lbl_docs_update_status.pack(anchor="w", pady=(2, 0))
-
-        btn_chk_app = ctk.CTkButton(
-            row_av,
-            text="🔄 Verificar Atualizações do App",
+        self.btn_sync_api_doc = ctk.CTkButton(
+            col_h_btns,
+            text="🔄 Sincronizar ao Vivo (API)",
             height=32,
-            width=210,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=("Segoe UI", 10, "bold"),
+            command=self.sincronizar_documentacao_api
+        )
+        self.btn_sync_api_doc.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_planilha = ctk.CTkButton(
+            col_h_btns,
+            text="📊 Planilha Google Oficial ↗",
+            height=32,
             fg_color="#1E293B",
             hover_color="#334155",
             font=("Segoe UI", 10, "bold"),
             border_width=1,
             border_color="#334155",
-            command=self.acao_clique_verificar_atualizacao
+            command=lambda: webbrowser.open(self.doc_pluggy_dados.get("url_planilha", "https://docs.google.com/spreadsheets/d/1AfMrzIRVJ-L-avqsGG26XEz8RsRanmjhp5NYQai5ysg/edit?usp=drivesdk"))
         )
-        btn_chk_app.pack(side=tk.RIGHT)
+        btn_planilha.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_legenda = ctk.CTkButton(
+            col_h_btns,
+            text="📖 Legenda do Suporte",
+            height=32,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10, "bold"),
+            border_width=1,
+            border_color="#334155",
+            command=self.abrir_modal_legenda_suporte
+        )
+        btn_legenda.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_portal = ctk.CTkButton(
+            col_h_btns,
+            text="🌐 docs.pluggy.ai ↗",
+            height=32,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10),
+            border_width=1,
+            border_color="#334155",
+            command=lambda: webbrowser.open("https://docs.pluggy.ai/pt")
+        )
+        btn_portal.pack(side=tk.LEFT)
+
+        # 2. Card em Destaque no Topo: ⚡ Banco do Item Atual (Captura Automática por Item ID)
+        self.card_item_capturado_doc = ctk.CTkFrame(container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1E293B")
+        self.card_item_capturado_doc.pack(fill=tk.X, pady=(0, 8))
+
+        row_item_ctrl = ctk.CTkFrame(self.card_item_capturado_doc, fg_color="transparent")
+        row_item_ctrl.pack(fill=tk.X, padx=16, pady=(10, 6))
+
+        ctk.CTkLabel(
+            row_item_ctrl,
+            text="⚡ BANCO DO ITEM ATUAL:",
+            font=("Segoe UI", 11, "bold"),
+            text_color="#38BDF8"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.entry_item_captura_doc = ctk.CTkEntry(
+            row_item_ctrl,
+            placeholder_text="Digite ou cole um Item ID (ex: 38902233-7f75-41f4...) ou nome de banco para capturar conector...",
+            height=30,
+            font=("Consolas", 11),
+            border_color="#1F2937"
+        )
+        self.entry_item_captura_doc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.entry_item_captura_doc.bind("<Return>", lambda e: self.acao_capturar_item_doc())
+
+        self.btn_capturar_item_doc = ctk.CTkButton(
+            row_item_ctrl,
+            text="🔍 Capturar Conector",
+            height=30,
+            width=150,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=("Segoe UI", 10, "bold"),
+            command=self.acao_capturar_item_doc
+        )
+        self.btn_capturar_item_doc.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_limpar_item_doc = ctk.CTkButton(
+            row_item_ctrl,
+            text="✕ Limpar",
+            height=30,
+            width=75,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10),
+            command=self.limpar_item_capturado_doc
+        )
+        self.btn_limpar_item_doc.pack(side=tk.LEFT)
+
+        # Corpo do Card de Item Capturado
+        self.frame_detalhes_item_capturado = ctk.CTkFrame(self.card_item_capturado_doc, fg_color="transparent")
+        self.frame_detalhes_item_capturado.pack(fill=tk.X, padx=16, pady=(0, 12))
+
+        self.atualizar_card_item_capturado_doc()
+
+        # 3. Barra de Busca e Filtros Rápidos
+        card_filtros = ctk.CTkFrame(container, fg_color="#111827", corner_radius=10, border_width=1, border_color="#1F2937")
+        card_filtros.pack(fill=tk.X, pady=(0, 8))
+
+        row_f = ctk.CTkFrame(card_filtros, fg_color="transparent")
+        row_f.pack(fill=tk.X, padx=12, pady=10)
+
+        self.entry_busca_doc_banco = ctk.CTkEntry(
+            row_f,
+            placeholder_text="🔍 Buscar por banco (Banco do Brasil, Itaú, Bradesco, Inter, Cresol, Sicoob...) ou ID (662, 218)...",
+            height=34,
+            font=("Segoe UI", 11),
+            border_color="#1F2937"
+        )
+        self.entry_busca_doc_banco.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.entry_busca_doc_banco.bind("<KeyRelease>", self._ao_digitar_busca_doc)
+
+        ctk.CTkLabel(row_f, text="Status:", font=("Segoe UI", 10, "bold"), text_color="#94A3B8").pack(side=tk.LEFT, padx=(0, 4))
+        self.combo_filtro_doc_status = ctk.CTkComboBox(
+            row_f,
+            values=["Todos", "Online", "Instáveis (Unstable)", "Offline"],
+            width=140,
+            height=32,
+            font=("Segoe UI", 10),
+            command=self._ao_alterar_filtros_doc
+        )
+        self.combo_filtro_doc_status.set("Todos")
+        self.combo_filtro_doc_status.pack(side=tk.LEFT, padx=(0, 10))
+
+        ctk.CTkLabel(row_f, text="Conexão:", font=("Segoe UI", 10, "bold"), text_color="#94A3B8").pack(side=tk.LEFT, padx=(0, 4))
+        self.combo_filtro_doc_conexao = ctk.CTkComboBox(
+            row_f,
+            values=["Todas", "Open Finance", "Direct"],
+            width=130,
+            height=32,
+            font=("Segoe UI", 10),
+            command=self._ao_alterar_filtros_doc
+        )
+        self.combo_filtro_doc_conexao.set("Todas")
+        self.combo_filtro_doc_conexao.pack(side=tk.LEFT, padx=(0, 10))
+
+        ctk.CTkLabel(row_f, text="Recurso:", font=("Segoe UI", 10, "bold"), text_color="#94A3B8").pack(side=tk.LEFT, padx=(0, 4))
+        self.combo_filtro_doc_recurso = ctk.CTkComboBox(
+            row_f,
+            values=["Todos", "Transações", "Cartão de Crédito", "Investimentos", "Dados de Pagamento", "Contas", "Identidade", "Empréstimos"],
+            width=150,
+            height=32,
+            font=("Segoe UI", 10),
+            command=self._ao_alterar_filtros_doc
+        )
+        self.combo_filtro_doc_recurso.set("Todos")
+        self.combo_filtro_doc_recurso.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_limpar_filtros = ctk.CTkButton(
+            row_f,
+            text="✕ Limpar",
+            width=70,
+            height=32,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10),
+            command=self.limpar_filtros_doc
+        )
+        btn_limpar_filtros.pack(side=tk.LEFT)
+
+        # Linha com contador
+        row_cnt = ctk.CTkFrame(container, fg_color="transparent")
+        row_cnt.pack(fill=tk.X, padx=4, pady=(0, 4))
+
+        self.lbl_contador_doc_bancos = ctk.CTkLabel(
+            row_cnt,
+            text="",
+            font=("Segoe UI", 10, "bold"),
+            text_color="#94A3B8"
+        )
+        self.lbl_contador_doc_bancos.pack(side=tk.LEFT)
+
+        self.lbl_doc_data_sync = ctk.CTkLabel(
+            row_cnt,
+            text=f"Última atualização da base: {self.doc_pluggy_dados.get('ultima_atualizacao', 'N/A')}",
+            font=("Segoe UI", 10),
+            text_color="#64748B"
+        )
+        self.lbl_doc_data_sync.pack(side=tk.RIGHT)
+
+        # 4. Tabela Completa de Recursos Homologados (Treeview)
+        frame_tabela_doc = ctk.CTkFrame(container, fg_color="#0F172A", corner_radius=10, border_width=1, border_color="#1E293B")
+        frame_tabela_doc.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        colunas_doc = (
+            "id", "instituicao", "conexao", "status", "contas",
+            "transacoes", "cartao", "pagamento", "investimentos",
+            "identidade", "emprestimos", "observacao"
+        )
+
+        self.tree_doc_conectores = ttk.Treeview(
+            frame_tabela_doc,
+            columns=colunas_doc,
+            show="headings",
+            selectmode="browse",
+            style="Treeview"
+        )
+
+        scroll_y = ttk.Scrollbar(frame_tabela_doc, orient="vertical", command=self.tree_doc_conectores.yview)
+        scroll_x = ttk.Scrollbar(frame_tabela_doc, orient="horizontal", command=self.tree_doc_conectores.xview)
+        self.tree_doc_conectores.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tree_doc_conectores.pack(fill=tk.BOTH, expand=True)
+
+        headers_config = [
+            ("id", "ID Pluggy", 70, "center"),
+            ("instituicao", "Instituição", 200, "w"),
+            ("conexao", "Conexão", 105, "center"),
+            ("status", "Status", 85, "center"),
+            ("contas", "Contas", 75, "center"),
+            ("transacoes", "Transações", 85, "center"),
+            ("cartao", "Cartão de Crédito", 105, "center"),
+            ("pagamento", "Dados de Pagamento", 115, "center"),
+            ("investimentos", "Investimentos", 95, "center"),
+            ("identidade", "Identidade", 85, "center"),
+            ("emprestimos", "Empréstimos", 90, "center"),
+            ("observacao", "Observação Técnica", 230, "w")
+        ]
+
+        for col_id, title, w, anch in headers_config:
+            self.tree_doc_conectores.heading(col_id, text=title, anchor=anch)
+            self.tree_doc_conectores.column(col_id, width=w, minwidth=50, anchor=anch)
+
+        self.tree_doc_conectores.tag_configure("online", foreground="#34D399")
+        self.tree_doc_conectores.tag_configure("unstable", foreground="#FBBF24")
+        self.tree_doc_conectores.tag_configure("offline", foreground="#F87171")
+        self.tree_doc_conectores.tag_configure("destaque_item", background="#0369A1", foreground="#FFFFFF")
+
+        self.tree_doc_conectores.bind("<<TreeviewSelect>>", self._ao_selecionar_linha_doc)
+        self.tree_doc_conectores.bind("<Double-1>", self._ao_duplo_clique_linha_doc)
+
+        # 5. Card de Detalhes Inferior
+        self.card_detalhe_inferior = ctk.CTkFrame(container, fg_color="#111827", corner_radius=10, border_width=1, border_color="#1F2937")
+        self.card_detalhe_inferior.pack(fill=tk.X)
+
+        self.renderizar_card_detalhe_inferior(None)
+
+        # Carrega dados
+        self.filtrar_tabela_documentacao()
+
+    def renderizar_card_detalhe_inferior(self, conector):
+        """Renderiza o card inferior com os dados do conector selecionado na tabela"""
+        if not hasattr(self, 'card_detalhe_inferior'):
+            return
+        for w in self.card_detalhe_inferior.winfo_children():
+            w.destroy()
+
+        if not conector:
+            pad = ctk.CTkFrame(self.card_detalhe_inferior, fg_color="transparent")
+            pad.pack(fill=tk.X, padx=16, pady=12)
+            ctk.CTkLabel(
+                pad,
+                text="💡 Selecione qualquer instituição na tabela acima para visualizar a ficha técnica de homologação e atalhos rápidos.",
+                font=("Segoe UI", 11),
+                text_color="#64748B"
+            ).pack(anchor="w")
+            return
+
+        pad = ctk.CTkFrame(self.card_detalhe_inferior, fg_color="transparent")
+        pad.pack(fill=tk.X, padx=16, pady=12)
+
+        row_top = ctk.CTkFrame(pad, fg_color="transparent")
+        row_top.pack(fill=tk.X, pady=(0, 6))
+
+        # Coluna Esquerda: Nome e Conector ID
+        col_esq = ctk.CTkFrame(row_top, fg_color="transparent")
+        col_esq.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        nome = conector.get("Instituição") or "Instituição"
+        cid = conector.get("ID Pluggy") or "-"
+        status = conector.get("Status") or "ONLINE"
+        conexao = conector.get("Conexão") or "Open Finance"
+        obs = conector.get("Observação automática") or conector.get("Observação Técnica") or ""
+
+        ctk.CTkLabel(
+            col_esq,
+            text=f"🏦 {nome}  •  Conector ID: #{cid}",
+            font=("Segoe UI", 13, "bold"),
+            text_color="#FFFFFF"
+        ).pack(anchor="w")
+
+        info_sub = f"Tipo: {conector.get('Tipo', 'BUSINESS_BANK')}  |  Conexão: {conexao}  |  OAuth: {conector.get('OAuth', 'Sim')}  |  MFA: {conector.get('MFA', 'Não')}"
+        ctk.CTkLabel(
+            col_esq,
+            text=info_sub,
+            font=("Segoe UI", 10),
+            text_color="#94A3B8"
+        ).pack(anchor="w", pady=(1, 0))
+
+        # Status Badge
+        cor_st = "#10B981" if status == "ONLINE" else ("#F59E0B" if status == "UNSTABLE" else "#EF4444")
+        cor_bg_st = "#064E3B" if status == "ONLINE" else ("#451A03" if status == "UNSTABLE" else "#450A0A")
+        badge_st = ctk.CTkFrame(row_top, fg_color=cor_bg_st, corner_radius=12, border_width=1, border_color=cor_st)
+        badge_st.pack(side=tk.LEFT, padx=(10, 14), ipady=2)
+        ctk.CTkLabel(badge_st, text=f"● {status}", font=("Segoe UI", 10, "bold"), text_color=cor_st).pack(padx=10, pady=2)
+
+        # Botões de Ação na Direita
+        col_dir = ctk.CTkFrame(row_top, fg_color="transparent")
+        col_dir.pack(side=tk.RIGHT)
+
+        btn_connect = ctk.CTkButton(
+            col_dir,
+            text="🌐 Conectar via Widget",
+            height=30,
+            fg_color="#0284C7",
+            hover_color="#0369A1",
+            font=("Segoe UI", 10, "bold"),
+            command=lambda: self.abrir_fluxo_connect_widget()
+        )
+        btn_connect.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_copiar = ctk.CTkButton(
+            col_dir,
+            text="📋 Copiar ID",
+            height=30,
+            width=85,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10),
+            border_width=1,
+            border_color="#334155",
+            command=lambda c=cid: self._copiar_texto_clipboard(str(c), "ID do Conector")
+        )
+        btn_copiar.pack(side=tk.LEFT)
+
+        # Linha de Recursos Homologados (Pills)
+        row_pills = ctk.CTkFrame(pad, fg_color="transparent")
+        row_pills.pack(fill=tk.X, pady=(4, 0))
+
+        recursos_lista = [
+            ("Contas", conector.get("Contas") == "Sim"),
+            ("Transações", conector.get("Transações") == "Sim"),
+            ("Cartões", conector.get("Cartão de Crédito") == "Sim"),
+            ("Pagamentos", conector.get("Dados de Pagamento") == "Sim"),
+            ("Investimentos", conector.get("Investimentos") == "Sim"),
+            ("Identidade", conector.get("Identidade") == "Sim"),
+            ("Empréstimos", conector.get("Empréstimos") == "Sim"),
+        ]
+
+        for rotulo, suporta in recursos_lista:
+            cor_bg = "#064E3B" if suporta else "#1E293B"
+            cor_txt = "#34D399" if suporta else "#64748B"
+            cor_bdr = "#059669" if suporta else "#334155"
+            icone = "✓" if suporta else "✗"
+            pill = ctk.CTkFrame(row_pills, fg_color=cor_bg, corner_radius=10, border_width=1, border_color=cor_bdr)
+            pill.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+            ctk.CTkLabel(pill, text=f"{icone} {rotulo}", font=("Segoe UI", 9, "bold"), text_color=cor_txt).pack(padx=8, pady=1)
+
+        if obs:
+            ctk.CTkLabel(
+                pad,
+                text=f"ℹ️ {obs}",
+                font=("Segoe UI", 10),
+                text_color="#38BDF8",
+                anchor="w"
+            ).pack(fill=tk.X, pady=(4, 0))
+
+    def atualizar_card_item_capturado_doc(self):
+        """Atualiza o card do topo da aba de Documentação quando um Item ID é capturado"""
+        if not hasattr(self, 'frame_detalhes_item_capturado'):
+            return
+        for w in self.frame_detalhes_item_capturado.winfo_children():
+            w.destroy()
+
+        if not self.item_capturado_doc:
+            if hasattr(self, 'card_item_capturado_doc'):
+                self.card_item_capturado_doc.configure(border_color="#1E293B")
+            pad_dica = ctk.CTkFrame(self.frame_detalhes_item_capturado, fg_color="#0B0F19", corner_radius=8, border_width=1, border_color="#1E293B")
+            pad_dica.pack(fill=tk.X, pady=2)
+            ctk.CTkLabel(
+                pad_dica,
+                text="💡 Dica: Ao consultar qualquer Item ID no \"Explorer de Transações\" ou \"Diagnóstico de Item\", o sistema identifica o banco automaticamente e exibe as especificações técnicas e homologação deste conector aqui em destaque.",
+                font=("Segoe UI", 10),
+                text_color="#94A3B8",
+                wraplength=950,
+                justify="left"
+            ).pack(fill=tk.X, padx=12, pady=8)
+            return
+
+        if hasattr(self, 'card_item_capturado_doc'):
+            self.card_item_capturado_doc.configure(border_color="#0284C7")
+        con = self.item_capturado_doc.get("conector") or {}
+        item_id = self.item_capturado_doc.get("item_id") or ""
+        nome = self.item_capturado_doc.get("nome") or con.get("Instituição") or "Instituição Identificada"
+        cid = con.get("ID Pluggy") or "-"
+        status = con.get("Status") or "ONLINE"
+        conexao = con.get("Conexão") or "Open Finance"
+        obs = con.get("Observação automática") or con.get("Observação Técnica") or "Conector homologado Open Finance."
+
+        # Linha 1: Título em destaque com nome do banco e badges de status
+        row_top = ctk.CTkFrame(self.frame_detalhes_item_capturado, fg_color="transparent")
+        row_top.pack(fill=tk.X, pady=(2, 6))
+
+        col_t = ctk.CTkFrame(row_top, fg_color="transparent")
+        col_t.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ctk.CTkLabel(
+            col_t,
+            text=f"⚡ Banco do Item Atual: {nome} (Conector ID: #{cid})",
+            font=("Segoe UI", 14, "bold"),
+            text_color="#38BDF8"
+        ).pack(anchor="w")
+
+        if item_id:
+            ctk.CTkLabel(
+                col_t,
+                text=f"Item ID Vinculado: {item_id}",
+                font=("Consolas", 10),
+                text_color="#94A3B8"
+            ).pack(anchor="w", pady=(1, 0))
+
+        # Status e Conexão Badges
+        cor_st = "#10B981" if status == "ONLINE" else ("#F59E0B" if status == "UNSTABLE" else "#EF4444")
+        cor_bg_st = "#064E3B" if status == "ONLINE" else ("#451A03" if status == "UNSTABLE" else "#450A0A")
+        badge_st = ctk.CTkFrame(row_top, fg_color=cor_bg_st, corner_radius=12, border_width=1, border_color=cor_st)
+        badge_st.pack(side=tk.RIGHT, padx=4, ipady=2)
+        ctk.CTkLabel(badge_st, text=f"● {status}", font=("Segoe UI", 10, "bold"), text_color=cor_st).pack(padx=10, pady=2)
+
+        badge_cx = ctk.CTkFrame(row_top, fg_color="#0C4A6E", corner_radius=12, border_width=1, border_color="#0284C7")
+        badge_cx.pack(side=tk.RIGHT, padx=4, ipady=2)
+        ctk.CTkLabel(badge_cx, text=f"🔒 {conexao}", font=("Segoe UI", 10, "bold"), text_color="#38BDF8").pack(padx=10, pady=2)
+
+        # Linha 2: Matriz de Recursos Homologados (Badges visuais)
+        row_matriz = ctk.CTkFrame(self.frame_detalhes_item_capturado, fg_color="#0B0F19", corner_radius=8, border_width=1, border_color="#1E293B")
+        row_matriz.pack(fill=tk.X, pady=(2, 6))
+
+        pad_m = ctk.CTkFrame(row_matriz, fg_color="transparent")
+        pad_m.pack(fill=tk.X, padx=12, pady=6)
+
+        ctk.CTkLabel(pad_m, text="MATRIZ DE RECURSOS:", font=("Segoe UI", 9, "bold"), text_color="#64748B").pack(side=tk.LEFT, padx=(0, 10))
+
+        recursos_item = [
+            ("Contas", con.get("Contas") == "Sim"),
+            ("Transações/Extrato", con.get("Transações") == "Sim"),
+            ("Cartão de Crédito", con.get("Cartão de Crédito") == "Sim"),
+            ("Pagamentos", con.get("Dados de Pagamento") == "Sim"),
+            ("Investimentos", con.get("Investimentos") == "Sim"),
+            ("Identidade", con.get("Identidade") == "Sim"),
+            ("Empréstimos", con.get("Empréstimos") == "Sim"),
+        ]
+
+        for rotulo, suporta in recursos_item:
+            cor_bg = "#064E3B" if suporta else "#1E293B"
+            cor_txt = "#34D399" if suporta else "#64748B"
+            cor_bdr = "#059669" if suporta else "#334155"
+            icone = "✓" if suporta else "✗"
+            pill = ctk.CTkFrame(pad_m, fg_color=cor_bg, corner_radius=8, border_width=1, border_color=cor_bdr)
+            pill.pack(side=tk.LEFT, padx=3)
+            ctk.CTkLabel(pill, text=f"{icone} {rotulo}", font=("Segoe UI", 9, "bold"), text_color=cor_txt).pack(padx=6, pady=1)
+
+        # Linha 3: Observação Técnica e Atalhos Diretos
+        row_acoes = ctk.CTkFrame(self.frame_detalhes_item_capturado, fg_color="transparent")
+        row_acoes.pack(fill=tk.X, pady=(2, 0))
+
+        col_obs = ctk.CTkFrame(row_acoes, fg_color="transparent")
+        col_obs.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ctk.CTkLabel(
+            col_obs,
+            text=f"ℹ️ {obs}",
+            font=("Segoe UI", 10),
+            text_color="#38BDF8",
+            anchor="w"
+        ).pack(anchor="w")
+
+        col_b = ctk.CTkFrame(row_acoes, fg_color="transparent")
+        col_b.pack(side=tk.RIGHT)
+
+        if item_id:
+            btn_t1 = ctk.CTkButton(
+                col_b,
+                text="🔍 Ver Transações",
+                height=28,
+                fg_color="#0284C7",
+                hover_color="#0369A1",
+                font=("Segoe UI", 10, "bold"),
+                command=lambda i=item_id: self._ir_para_transacoes_item(i)
+            )
+            btn_t1.pack(side=tk.LEFT, padx=4)
+
+            btn_t2 = ctk.CTkButton(
+                col_b,
+                text="🛠️ Ver Diagnóstico",
+                height=28,
+                fg_color="#1E293B",
+                hover_color="#334155",
+                font=("Segoe UI", 10, "bold"),
+                border_width=1,
+                border_color="#334155",
+                command=lambda i=item_id: self._ir_para_diagnostico_item(i)
+            )
+            btn_t2.pack(side=tk.LEFT, padx=4)
+
+        btn_wgt = ctk.CTkButton(
+            col_b,
+            text="🌐 Conectar via Widget",
+            height=28,
+            fg_color="#059669",
+            hover_color="#047857",
+            font=("Segoe UI", 10, "bold"),
+            command=lambda i=item_id: self.abrir_fluxo_connect_widget(item_id=i if i else None)
+        )
+        btn_wgt.pack(side=tk.LEFT, padx=4)
+
+        btn_cp = ctk.CTkButton(
+            col_b,
+            text="📋 Copiar ID",
+            height=28,
+            width=80,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 10),
+            border_width=1,
+            border_color="#334155",
+            command=lambda c=cid: self._copiar_texto_clipboard(str(c), "ID do Conector")
+        )
+        btn_cp.pack(side=tk.LEFT, padx=4)
+
+    def _ir_para_transacoes_item(self, item_id):
+        self.tabview.set("Explorer de Transações")
+        if hasattr(self, 'entry_item_id'):
+            self.entry_item_id.delete(0, tk.END)
+            self.entry_item_id.insert(0, item_id)
+            self.acao_buscar_contas()
+
+    def _ir_para_diagnostico_item(self, item_id):
+        self.tabview.set("Diagnóstico de Item (Erros)")
+        if hasattr(self, 'entry_diag_item_id'):
+            self.entry_diag_item_id.delete(0, tk.END)
+            self.entry_diag_item_id.insert(0, item_id)
+            self.acao_diagnosticar_item()
+
+    def _copiar_texto_clipboard(self, texto, rotulo="Texto"):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(texto)
+            self.update()
+            self.exibir_alerta("Copiado", f"{rotulo} copiado para a área de transferência!", cor="#0284C7")
+        except Exception:
+            pass
+
+    def capturar_banco_para_documentacao(self, conector_id_ou_nome, item_id=None, nome_banco=None):
+        """Identifica o banco e atualiza o card do topo da aba 'Documentação & Conectores PJ'"""
+        if not conector_id_ou_nome and not nome_banco:
+            return
+
+        con_encontrado = None
+        conectores = self.doc_pluggy_dados.get("conectores", [])
+
+        # 1. Busca por ID exato
+        if conector_id_ou_nome:
+            cid_str = str(conector_id_ou_nome).strip()
+            for c in conectores:
+                if str(c.get("ID Pluggy")).strip() == cid_str:
+                    con_encontrado = c
+                    break
+
+        # 2. Busca por nome se não encontrou por ID
+        if not con_encontrado:
+            alvo = normalizar_texto_busca(nome_banco or conector_id_ou_nome)
+            if alvo:
+                for c in conectores:
+                    c_norm = normalizar_texto_busca(c.get("Instituição", ""))
+                    if alvo in c_norm or c_norm in alvo:
+                        con_encontrado = c
+                        break
+
+        # 3. Fallback se conector não estiver pré-cadastrado no JSON
+        if not con_encontrado:
+            con_encontrado = {
+                "ID Pluggy": str(conector_id_ou_nome or "-"),
+                "Instituição": str(nome_banco or conector_id_ou_nome or "Instituição Identificada"),
+                "Tipo": "BUSINESS_BANK",
+                "Conexão": "Open Finance",
+                "Status": "ONLINE",
+                "Contas": "Sim",
+                "Transações": "Sim",
+                "Cartão de Crédito": "Não",
+                "Dados de Pagamento": "Sim",
+                "Investimentos": "Não",
+                "Identidade": "Sim",
+                "Empréstimos": "Não",
+                "Observação automática": "Conector identificado via Item ID da Pluggy."
+            }
+
+        self.item_capturado_doc = {
+            "item_id": item_id,
+            "conector": con_encontrado,
+            "nome": con_encontrado.get("Instituição") or nome_banco
+        }
+
+        # Atualiza a UI se a aba já foi criada
+        if hasattr(self, 'frame_detalhes_item_capturado'):
+            self.atualizar_card_item_capturado_doc()
+            if hasattr(self, 'entry_item_captura_doc') and item_id:
+                self.entry_item_captura_doc.delete(0, tk.END)
+                self.entry_item_captura_doc.insert(0, item_id)
+
+            # Destaca a linha na tabela de conectores
+            if hasattr(self, 'tree_doc_conectores'):
+                cid_target = str(con_encontrado.get("ID Pluggy"))
+                for iid in self.tree_doc_conectores.get_children():
+                    vals = self.tree_doc_conectores.item(iid, "values")
+                    if vals and str(vals[0]) == cid_target:
+                        self.tree_doc_conectores.selection_set(iid)
+                        self.tree_doc_conectores.see(iid)
+                        self.renderizar_card_detalhe_inferior(con_encontrado)
+                        break
+
+    def _ao_digitar_busca_doc(self, event=None):
+        if hasattr(self, '_filtro_doc_debounce') and self._filtro_doc_debounce:
+            self.after_cancel(self._filtro_doc_debounce)
+        self._filtro_doc_debounce = self.after(200, self.filtrar_tabela_documentacao)
+
+    def _ao_alterar_filtros_doc(self, _=None):
+        self.filtrar_tabela_documentacao()
+
+    def limpar_filtros_doc(self):
+        if hasattr(self, 'entry_busca_doc_banco'):
+            self.entry_busca_doc_banco.delete(0, tk.END)
+        if hasattr(self, 'combo_filtro_doc_status'):
+            self.combo_filtro_doc_status.set("Todos")
+        if hasattr(self, 'combo_filtro_doc_conexao'):
+            self.combo_filtro_doc_conexao.set("Todas")
+        if hasattr(self, 'combo_filtro_doc_recurso'):
+            self.combo_filtro_doc_recurso.set("Todos")
+        self.filtrar_tabela_documentacao()
+
+    def filtrar_tabela_documentacao(self):
+        """Filtra e popula os conectores na Treeview da documentação"""
+        if not hasattr(self, 'tree_doc_conectores'):
+            return
+
+        termo = normalizar_texto_busca(self.entry_busca_doc_banco.get().strip()) if hasattr(self, 'entry_busca_doc_banco') else ""
+        st_filtro = self.combo_filtro_doc_status.get() if hasattr(self, 'combo_filtro_doc_status') else "Todos"
+        cx_filtro = self.combo_filtro_doc_conexao.get() if hasattr(self, 'combo_filtro_doc_conexao') else "Todas"
+        rec_filtro = self.combo_filtro_doc_recurso.get() if hasattr(self, 'combo_filtro_doc_recurso') else "Todos"
+
+        conectores = self.doc_pluggy_dados.get("conectores", [])
+        filtrados = []
+
+        for c in conectores:
+            cid = str(c.get("ID Pluggy", ""))
+            nome = c.get("Instituição", "")
+            nome_norm = normalizar_texto_busca(nome)
+            status = (c.get("Status") or "ONLINE").upper()
+            conexao = c.get("Conexão") or "Open Finance"
+
+            # 1. Filtro de Texto (Nome ou ID)
+            if termo:
+                if termo not in cid and termo not in nome_norm:
+                    continue
+
+            # 2. Filtro de Status
+            if st_filtro == "Online" and status != "ONLINE":
+                continue
+            elif st_filtro == "Instáveis (Unstable)" and status != "UNSTABLE":
+                continue
+            elif st_filtro == "Offline" and status != "OFFLINE":
+                continue
+
+            # 3. Filtro de Conexão
+            if cx_filtro == "Open Finance" and conexao != "Open Finance":
+                continue
+            elif cx_filtro == "Direct" and conexao != "Direct":
+                continue
+
+            # 4. Filtro de Recurso Homologado
+            if rec_filtro != "Todos":
+                chave_rec = rec_filtro
+                if rec_filtro == "Cartões":
+                    chave_rec = "Cartão de Crédito"
+                elif rec_filtro == "Pagamentos":
+                    chave_rec = "Dados de Pagamento"
+                if c.get(chave_rec) != "Sim":
+                    continue
+
+            filtrados.append(c)
+
+        # Atualiza a tabela
+        self.tree_doc_conectores.delete(*self.tree_doc_conectores.get_children())
+
+        cid_capturado = None
+        if self.item_capturado_doc and self.item_capturado_doc.get("conector"):
+            cid_capturado = str(self.item_capturado_doc["conector"].get("ID Pluggy", ""))
+
+        for c in filtrados:
+            cid = str(c.get("ID Pluggy", ""))
+            nome = c.get("Instituição", "")
+            conexao = c.get("Conexão", "")
+            status = c.get("Status", "ONLINE")
+            contas = c.get("Contas", "Não")
+            trans = c.get("Transações", "Não")
+            cartao = c.get("Cartão de Crédito", "Não")
+            pag = c.get("Dados de Pagamento", "Não")
+            inv = c.get("Investimentos", "Não")
+            ident = c.get("Identidade", "Não")
+            emp = c.get("Empréstimos", "Não")
+            obs = c.get("Observação automática") or c.get("Observação Técnica") or ""
+
+            tags = []
+            if cid_capturado and cid == cid_capturado:
+                tags.append("destaque_item")
+            elif status == "ONLINE":
+                tags.append("online")
+            elif status == "UNSTABLE":
+                tags.append("unstable")
+            else:
+                tags.append("offline")
+
+            self.tree_doc_conectores.insert(
+                "",
+                tk.END,
+                values=(cid, nome, conexao, status, contas, trans, cartao, pag, inv, ident, emp, obs),
+                tags=tags
+            )
+
+        if hasattr(self, 'lbl_contador_doc_bancos'):
+            self.lbl_contador_doc_bancos.configure(
+                text=f"Exibindo {len(filtrados)} de {len(conectores)} conectores PJ homologados na Pluggy"
+            )
+
+    def _ao_selecionar_linha_doc(self, event=None):
+        sel = self.tree_doc_conectores.selection()
+        if not sel:
+            return
+        vals = self.tree_doc_conectores.item(sel[0], "values")
+        if not vals:
+            return
+        cid_sel = str(vals[0])
+        con_encontrado = None
+        for c in self.doc_pluggy_dados.get("conectores", []):
+            if str(c.get("ID Pluggy")) == cid_sel:
+                con_encontrado = c
+                break
+        if con_encontrado:
+            self.renderizar_card_detalhe_inferior(con_encontrado)
+
+    def _ao_duplo_clique_linha_doc(self, event=None):
+        sel = self.tree_doc_conectores.selection()
+        if not sel:
+            return
+        vals = self.tree_doc_conectores.item(sel[0], "values")
+        if vals:
+            cid_sel = str(vals[0])
+            nome_sel = str(vals[1])
+            self.capturar_banco_para_documentacao(cid_sel, nome_banco=nome_sel)
+
+    def limpar_item_capturado_doc(self):
+        self.item_capturado_doc = None
+        if hasattr(self, 'entry_item_captura_doc'):
+            self.entry_item_captura_doc.delete(0, tk.END)
+        self.atualizar_card_item_capturado_doc()
+        self.filtrar_tabela_documentacao()
+        self.renderizar_card_detalhe_inferior(None)
+
+    def acao_capturar_item_doc(self):
+        """Ao clicar no botão 'Capturar Conector' ou teclar Enter no campo de Item ID"""
+        termo = self.entry_item_captura_doc.get().strip()
+        if not termo:
+            self.exibir_alerta("Item ID Vazio", "Digite ou cole um Item ID ou nome de banco para capturar.", cor="#F59E0B")
+            return
+
+        # Se for um UUID (formato clássico de itemId da Pluggy)
+        if re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', termo):
+            self.btn_capturar_item_doc.configure(text="Capturando...", state="disabled")
+            def worker():
+                try:
+                    if not self.obter_api_key():
+                        raise Exception("Falha ao obter API Key.")
+                    url = f"{PLUGGY_BASE_URL}/items/{termo}"
+                    res = requests.get(url, headers={"accept": "application/json", "X-API-KEY": self.api_key}, timeout=15)
+                    if res.status_code == 200:
+                        it = res.json()
+                        cid = (it.get("connector") or {}).get("id") or it.get("connectorId")
+                        cnome = (it.get("connector") or {}).get("name")
+                        self.safe_after(0, lambda: self.capturar_banco_para_documentacao(cid, termo, cnome))
+                        self.safe_after(0, lambda: self.exibir_alerta("Item Capturado", f"Conector #{cid} ({cnome}) identificado com sucesso!", cor="#10B981"))
+                    else:
+                        self.safe_after(0, lambda: self.exibir_alerta("Item Não Localizado", f"A API retornou HTTP {res.status_code}.", cor="#F59E0B"))
+                except Exception as e:
+                    self.safe_after(0, lambda err=str(e): self.exibir_alerta("Erro na Captura", err, cor="#F43F5E"))
+                finally:
+                    self.safe_after(0, lambda: self.btn_capturar_item_doc.configure(text="🔍 Capturar Conector", state="normal"))
+            threading.Thread(target=worker, daemon=True).start()
+        elif termo.isdigit():
+            # Conector ID direto
+            self.capturar_banco_para_documentacao(termo)
+        else:
+            # Nome do banco digitado
+            self.capturar_banco_para_documentacao(termo, nome_banco=termo)
+
+    def sincronizar_documentacao_api(self):
+        """Consulta /connectors?types=BUSINESS_BANK na API Pluggy em tempo real e atualiza documentacao_pluggy_bancos.json"""
+        self.btn_sync_api_doc.configure(text="⏳ Sincronizando...", state="disabled")
+        self.exibir_alerta("Sincronizando", "Consultando conectores empresariais na API Pluggy...", cor="#0284C7")
+
+        def worker():
+            try:
+                if not self.obter_api_key():
+                    raise Exception("Não foi possível autenticar com a Pluggy. Verifique suas credenciais.")
+
+                url = f"{PLUGGY_BASE_URL}/connectors?types=BUSINESS_BANK"
+                res = requests.get(url, headers={"accept": "application/json", "X-API-KEY": self.api_key}, timeout=25)
+                if res.status_code == 401:
+                    if self.obter_api_key(force_refresh=True):
+                        res = requests.get(url, headers={"accept": "application/json", "X-API-KEY": self.api_key}, timeout=25)
+
+                if res.status_code != 200:
+                    raise Exception(f"HTTP {res.status_code}: {res.text}")
+
+                dados_api = res.json()
+                results = dados_api.get("results") or []
+                if not results:
+                    raise Exception("Nenhum conector retornado pela API.")
+
+                novos_conectores = []
+                mapa_existentes = {str(c.get("ID Pluggy")): c for c in self.doc_pluggy_dados.get("conectores", [])}
+
+                for item in results:
+                    cid = str(item.get("id"))
+                    nome = item.get("name") or "Instituição"
+                    is_of = bool(item.get("isOpenFinance"))
+                    has_mfa = bool(item.get("hasMFA"))
+                    is_oauth = bool(item.get("oauth"))
+                    health = item.get("health") or {}
+                    status = (health.get("status") or "ONLINE").upper()
+                    prods = item.get("products") or []
+                    supports_pay = bool(item.get("supportsPaymentInitiation"))
+
+                    con_dict = {
+                        "ID Pluggy": cid,
+                        "Instituição": nome,
+                        "Tipo": item.get("type") or "BUSINESS_BANK",
+                        "Conexão": "Open Finance" if is_of else "Direct",
+                        "Open Finance": "Sim" if is_of else "Não",
+                        "MFA": "Sim" if has_mfa else "Não",
+                        "OAuth": "Sim" if is_oauth else "Não",
+                        "Status": status,
+                        "Contas": "Sim" if "ACCOUNTS" in prods else "Não",
+                        "Transações": "Sim" if "TRANSACTIONS" in prods else "Não",
+                        "Cartão de Crédito": "Sim" if "CREDIT_CARDS" in prods else "Não",
+                        "Dados de Pagamento": "Sim" if ("PAYMENT_DATA" in prods or supports_pay) else "Não",
+                        "Investimentos": "Sim" if "INVESTMENTS" in prods else "Não",
+                        "Transações de Investimentos": "Sim" if "INVESTMENT_TRANSACTIONS" in prods else "Não",
+                        "Identidade": "Sim" if "IDENTITY" in prods else "Não",
+                        "Empréstimos": "Sim" if "LOANS" in prods else "Não",
+                        "Nota de Corretagem": "Sim" if "BROKERAGE_NOTE" in prods else "Não",
+                        "Movimentação de Títulos": "Não",
+                        "Atualização Pluggy": item.get("updatedAt", ""),
+                        "Última consulta": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "Observação automática": "Conector via Open Finance." if is_of else "Conector via integração direta."
+                    }
+
+                    if cid in mapa_existentes and mapa_existentes[cid].get("Observação Técnica"):
+                        con_dict["Observação Técnica"] = mapa_existentes[cid]["Observação Técnica"]
+
+                    novos_conectores.append(con_dict)
+
+                self.doc_pluggy_dados["conectores"] = novos_conectores
+                self.doc_pluggy_dados["total_conectores"] = len(novos_conectores)
+                self.doc_pluggy_dados["ultima_atualizacao"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+                salvar_documentacao_pluggy(self.doc_pluggy_dados)
+
+                def atualizar_sucesso():
+                    self.lbl_doc_subtitulo.configure(
+                        text=f"Referência técnica dinâmica da planilha oficial e conectores empresariais Pluggy Open Finance. ({len(novos_conectores)} homologados)"
+                    )
+                    self.lbl_doc_data_sync.configure(
+                        text=f"Última atualização da base: {self.doc_pluggy_dados['ultima_atualizacao']}"
+                    )
+                    self.filtrar_tabela_documentacao()
+                    self.exibir_alerta(
+                        "Sincronização Concluída",
+                        f"{len(novos_conectores)} conectores PJ atualizados com sucesso da API Pluggy!",
+                        cor="#059669"
+                    )
+
+                self.safe_after(0, atualizar_sucesso)
+
+            except Exception as e:
+                err_msg = str(e)
+                self.safe_after(0, lambda: self.exibir_alerta("Falha na Sincronização", err_msg, cor="#F43F5E"))
+            finally:
+                self.safe_after(0, lambda: self.btn_sync_api_doc.configure(text="🔄 Sincronizar ao Vivo (API)", state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def abrir_modal_legenda_suporte(self):
+        """Abre o modal explicativo com a legenda técnica dos recursos homologados e impacto no Conciliador"""
+        leg_win = ctk.CTkToplevel(self)
+        leg_win.title("📖 Legenda Técnica de Recursos Homologados (Suporte Pluggy)")
+        w, h = 820, 640
+        rx = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        ry = self.winfo_rooty() + (self.winfo_height() - h) // 2
+        leg_win.geometry(f"{w}x{h}+{max(50, rx)}+{max(50, ry)}")
+        leg_win.transient(self)
+        leg_win.configure(fg_color="#0B0F19")
+
+        head = ctk.CTkFrame(leg_win, fg_color="#0F172A", height=70, corner_radius=0)
+        head.pack(fill=tk.X)
+
+        pad_h = ctk.CTkFrame(head, fg_color="transparent")
+        pad_h.pack(fill=tk.X, padx=20, pady=12)
+
+        ctk.CTkLabel(
+            pad_h,
+            text="📖 Legenda Técnica de Recursos Homologados (Suporte)",
+            font=("Segoe UI", 16, "bold"),
+            text_color="#FFFFFF"
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            pad_h,
+            text="Significado técnico de cada coluna da planilha oficial e seu impacto prático no Conciliador Contábil:",
+            font=("Segoe UI", 11),
+            text_color="#94A3B8"
+        ).pack(anchor="w", pady=(2, 0))
+
+        ctk.CTkFrame(leg_win, height=2, fg_color="#0284C7", corner_radius=0).pack(fill=tk.X)
+
+        scroll_leg = ctk.CTkScrollableFrame(leg_win, fg_color="transparent")
+        scroll_leg.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+
+        legendas = self.doc_pluggy_dados.get("legenda", [])
+        if not legendas:
+            legendas = [
+                {"campo": "Contas", "significado": "Dados das contas bancárias do cliente.", "pratica_suporte": "Permite identificar conta, agência, banco, tipo de conta e informações básicas da conta."},
+                {"campo": "Transações", "significado": "Movimentações realizadas na conta.", "pratica_suporte": "Entradas e saídas do extrato bancário: PIX, TED, boletos, tarifas, transferências etc. É uma das informações mais importantes para o Conciliador."},
+                {"campo": "Cartão de Crédito", "significado": "Dados relacionados aos cartões de crédito.", "pratica_suporte": "Permite acessar informações do cartão e faturas/movimentações quando disponibilizadas."},
+                {"campo": "Dados de Pagamento", "significado": "Informações relacionadas a pagamentos realizados ou agendados.", "pratica_suporte": "Dados de pagamentos, boletos e transferências da instituição."},
+                {"campo": "Investimentos", "significado": "Informações sobre os investimentos do cliente.", "pratica_suporte": "Permite consultar posições e aplicações mantidas no banco."},
+                {"campo": "Identidade", "significado": "Dados de identificação do titular da conta.", "pratica_suporte": "Informações de identificação do titular (CNPJ/CPF, razão social/nome)."},
+                {"campo": "Empréstimos", "significado": "Informações sobre operações de crédito/empréstimos.", "pratica_suporte": "Permite consultar contratos de crédito e empréstimos ativos."}
+            ]
+
+        for item in legendas:
+            campo = item.get("campo", "")
+            sig = item.get("significado", "")
+            prat = item.get("pratica_suporte", "")
+
+            card = ctk.CTkFrame(scroll_leg, fg_color="#111827", corner_radius=10, border_width=1, border_color="#1E293B")
+            card.pack(fill=tk.X, pady=4)
+
+            pad_c = ctk.CTkFrame(card, fg_color="transparent")
+            pad_c.pack(fill=tk.X, padx=16, pady=12)
+
+            row_tit = ctk.CTkFrame(pad_c, fg_color="transparent")
+            row_tit.pack(fill=tk.X, pady=(0, 4))
+
+            badge_campo = ctk.CTkFrame(row_tit, fg_color="#0C4A6E", corner_radius=8, border_width=1, border_color="#0284C7")
+            badge_campo.pack(side=tk.LEFT, ipady=1)
+            ctk.CTkLabel(badge_campo, text=f"📌 {campo}", font=("Segoe UI", 11, "bold"), text_color="#38BDF8").pack(padx=10, pady=2)
+
+            ctk.CTkLabel(
+                pad_c,
+                text=f"📘 Significado: {sig}",
+                font=("Segoe UI", 11),
+                text_color="#F8FAFC",
+                wraplength=730,
+                justify="left"
+            ).pack(anchor="w", pady=(4, 2))
+
+            ctk.CTkLabel(
+                pad_c,
+                text=f"⚡ Prática no Suporte / Conciliador: {prat}",
+                font=("Segoe UI", 10),
+                text_color="#34D399",
+                wraplength=730,
+                justify="left"
+            ).pack(anchor="w")
+
+        bot = ctk.CTkFrame(leg_win, fg_color="#0F172A", height=50, corner_radius=0)
+        bot.pack(fill=tk.X)
+        ctk.CTkButton(
+            bot,
+            text="Fechar Legenda",
+            height=32,
+            width=130,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            font=("Segoe UI", 11, "bold"),
+            command=leg_win.destroy
+        ).pack(side=tk.RIGHT, padx=16, pady=9)
+
+    def acao_abrir_doc_do_diag(self):
+        """Atalho a partir da aba de Diagnóstico para ver os recursos do banco na Documentação"""
+        self.tabview.set("Documentação & Conectores PJ")
+        if self.item_diag_info:
+            banco_id = self.item_diag_info.get("banco_id")
+            banco_nome = self.item_diag_info.get("banco_nome")
+            item_id = self.entry_diag_item_id.get().strip() if hasattr(self, 'entry_diag_item_id') else ""
+            self.capturar_banco_para_documentacao(banco_id, item_id, banco_nome)
 
     def definir_instituicao_e_prazo(self, nome_ou_id, silencioso=False):
         """
@@ -6413,8 +7291,11 @@ class ModernPluggyApp(ctk.CTk):
                 if res_it.status_code == 200:
                     it_json = res_it.json()
                     b_nome = (it_json.get("connector") or {}).get("name")
+                    b_cid = (it_json.get("connector") or {}).get("id") or it_json.get("connectorId")
                     if b_nome:
                         self.safe_after(0, lambda n=b_nome: self.definir_instituicao_e_prazo(n, silencioso=True))
+                    if b_cid or b_nome:
+                        self.safe_after(0, lambda cid=b_cid, iid=item_id, cnome=b_nome: self.capturar_banco_para_documentacao(cid, iid, cnome))
             except Exception:
                 pass
             contas_temp = {}
@@ -7126,6 +8007,8 @@ class ModernPluggyApp(ctk.CTk):
                     self.safe_after(0, lambda n=con_nome: self.definir_instituicao_e_prazo(n, silencioso=True))
                 if con_id:
                     data["_incidentes_conector"] = buscar_incidentes_para_conector(con_id, con_nome)
+                if con_id or con_nome:
+                    self.safe_after(0, lambda cid=con_id, iid=item_id, cnome=con_nome: self.capturar_banco_para_documentacao(cid, iid, cnome))
             except Exception as e:
                 print("Erro ao buscar incidentes do conector para o diagnóstico:", e)
 
